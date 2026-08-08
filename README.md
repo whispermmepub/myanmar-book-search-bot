@@ -40,4 +40,5 @@ railway variables --set TELEGRAM_BOT_TOKEN=... --set TELEGRAM_OWNER_ID=...
 ```
 
 Search matching: case-insensitive၊ Unicode-normalized၊ space/punctuation ဖယ်၍ substring နှင့် token match လုပ်သည်။
+Group များတွင် bot ၏ reply message များကို ပြသပြီး ၅ မိနစ်အကြာတွင် auto-delete လုပ်သည် (DM တွင် မဖျက်ပါ)။
 အချက်အလက် ပြည့်စုံသော စာအုပ်များသာ (ကာဗာပုံ၊ စာရေးသူ၊ အမည်၊ ဈေး၊ အကြိမ်၊ တိုက်) ပြသသည်။

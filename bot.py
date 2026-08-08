@@ -129,14 +129,36 @@ def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | 
     return query or None
 
 
-async def send_book_card(target, book: dict, reply_markup=None) -> None:
+async def delete_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id, message_id = context.job.data
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        log.info("Auto-deleted message %s in chat %s", message_id, chat_id)
+    except Exception:  # noqa: BLE001
+        pass  # already deleted or cannot be deleted
+
+
+def schedule_auto_delete(context: ContextTypes.DEFAULT_TYPE, chat, message_id: int, delay: float = 300) -> None:
+    """Delete a bot message after `delay` seconds, only in groups (not in DMs)."""
+    if chat.type not in ("group", "supergroup"):
+        return
+    name = f"del:{chat.id}:{message_id}"
+    for job in context.job_queue.get_jobs_by_name(name):
+        job.schedule_removal()
+    context.job_queue.run_once(delete_job, delay, data=(chat.id, message_id), name=name)
+
+
+async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE | None = None, reply_markup=None):
     caption = build_caption(book)
     path = await images.get(book["image_id"])
     if path:
         with open(path, "rb") as fh:
-            await target.reply_photo(photo=fh, caption=caption, reply_markup=reply_markup)
+            sent = await target.reply_photo(photo=fh, caption=caption, reply_markup=reply_markup)
     else:
-        await target.reply_text(caption, reply_markup=reply_markup)
+        sent = await target.reply_text(caption, reply_markup=reply_markup)
+    if context:
+        schedule_auto_delete(context, target.chat, sent.message_id)
+    return sent
 
 
 def _page_count(total: int) -> int:
@@ -178,13 +200,14 @@ def _list_keyboard(state: dict) -> InlineKeyboardMarkup:
 async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     results = store.search(query, limit=RESULT_CAP)
     if not results:
-        await target.reply_text(
+        sent = await target.reply_text(
             "😕 ဒီစာအုပ် (သို့) စာရေးသူ မတွေ့ပါဘူး။\n"
             "နာမည် အနည်းငယ်ပဲ ရိုက်ကြည့်ပါ။"
         )
+        schedule_auto_delete(context, target.chat, sent.message_id)
         return
     if len(results) == 1:
-        await send_book_card(target, results[0])
+        await send_book_card(target, results[0], context=context)
         return
     state = {
         "query": query,
@@ -195,6 +218,7 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
     context.user_data["search_state"] = state
     msg = await target.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
     state["list_message_id"] = msg.message_id
+    schedule_auto_delete(context, target.chat, msg.message_id)
 
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -208,10 +232,11 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         query,
     )
     if query is None:
-        await update.effective_message.reply_text(
+        sent = await update.effective_message.reply_text(
             f"🤖 စာအုပ်နာမည် (သို့) စာရေးသူနာမည် ရိုက်ပြီး ရှာပါ။\n"
             f"ဥပမာ: @{context.bot.username} မြစ်ရိုင်း"
         )
+        schedule_auto_delete(context, update.effective_message.chat, sent.message_id)
         return
     await send_search_results(update.effective_message, query, context)
 
@@ -225,16 +250,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if data in ("page:next", "page:prev"):
         if not state:
-            await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
+            sent = await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
+            schedule_auto_delete(context, cb.message.chat, sent.message_id)
             return
         pages = _page_count(len(state["results"]))
         page = state["page"] + (1 if data == "page:next" else -1)
         state["page"] = max(0, min(pages - 1, page))
         await cb.message.edit_text(_list_text(state), reply_markup=_list_keyboard(state))
+        schedule_auto_delete(context, cb.message.chat, cb.message.message_id)
         return
     if data == "page:back":
         if not state:
-            await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
+            sent = await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
+            schedule_auto_delete(context, cb.message.chat, sent.message_id)
             return
         # remove the detail card so only the list remains visible
         card_id = state.get("card_message_id") or cb.message.message_id
@@ -251,13 +279,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup=_list_keyboard(state),
             )
         except Exception:  # noqa: BLE001
-            await cb.message.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
+            sent = await cb.message.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
+            schedule_auto_delete(context, cb.message.chat, sent.message_id)
+            return
+        schedule_auto_delete(context, cb.message.chat, state["list_message_id"])
         return
     if data.startswith("book:"):
         book_id = int(data.split(":", 1)[1])
         book = store.by_id(book_id)
         if not book:
-            await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။ ထပ်ရှာကြည့်ပါ။")
+            sent = await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။ ထပ်ရှာကြည့်ပါ။")
+            schedule_auto_delete(context, cb.message.chat, sent.message_id)
             return
         if state:
             old_card = state.get("card_message_id")
@@ -271,7 +303,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             back_kb = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("📚 စာရင်းပြန်ကြည့်မယ်", callback_data="page:back")]]
             )
-        sent = await send_book_card(cb.message, book, reply_markup=back_kb)
+        sent = await send_book_card(cb.message, book, context=context, reply_markup=back_kb)
         if state:
             state["card_message_id"] = sent.message_id
 
