@@ -336,6 +336,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔸 Private chat: နာမည်ရိုက်ရုံပါပဲ\n"
         f"🔸 Group: `@{bot} နာမည်` ဆိုပြီး mention လုပ်ပါ\n"
         f"🔸 Inline: ဘယ် chat မှာမဆို `@{bot} နာမည်` ရိုက်ပါ\n\n"
+        "📚 `/books` — စာအုပ်အားလုံး ကြည့်ရန်\n"
+        "🏢 `/publishers` — စာအုပ်တိုက်အားလုံး ကြည့်ရန်\n\n"
         "ဥပမာ - `မြစ်ရိုင်း`၊ `bro code`၊ `တင်မောင်မြင့်`"
     )
 
@@ -453,7 +455,14 @@ def _page_count(total: int) -> int:
 def _list_text(state: dict) -> str:
     total = len(state["results"])
     pages = _page_count(total)
-    lines = [f"🔍 `{state['query']}` အတွက် စာအုပ် {total} ခု တွေ့ပါတယ်။"]
+    mode = state.get("mode")
+    if mode == "allbooks":
+        head = f"📚 စာအုပ်အားလုံး — စုစုပေါင်း {total} ခု"
+    elif mode == "pubbooks":
+        head = f"🏢 `{state['query']}` တိုက်ရဲ့ စာအုပ် {total} ခု"
+    else:
+        head = f"🔍 `{state['query']}` အတွက် စာအုပ် {total} ခု တွေ့ပါတယ်။"
+    lines = [head]
     if pages > 1:
         lines.append(f"📄 မျက်နှာ {state['page'] + 1}/{pages}")
     lines.append("\nကြည့်ချင်တဲ့ စာအုပ်ကို ရွေးပါ 👇")
@@ -507,6 +516,82 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
     schedule_auto_delete(context, target.chat.id, target.chat.type, msg.message_id)
 
 
+def _publisher_list() -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for b in store.books:
+        p = b["publisher"]
+        counts[p] = counts.get(p, 0) + 1
+    return sorted(counts.items(), key=lambda x: (-x[1], x[0].casefold()))
+
+
+def _publisher_list_text(state: dict) -> str:
+    total = len(state["publishers"])
+    pages = _page_count(total)
+    lines = [f"🏢 စာအုပ်တိုက် စုစုပေါင်း {total} ခု"]
+    if pages > 1:
+        lines.append(f"📄 မျက်နှာ {state['page'] + 1}/{pages}")
+    lines.append("\nကြည့်ချင်တဲ့ တိုက်ကို ရွေးပါ 👇")
+    return "\n".join(lines)
+
+
+def _publisher_list_keyboard(state: dict) -> InlineKeyboardMarkup:
+    total = len(state["publishers"])
+    pages = _page_count(total)
+    start = state["page"] * PAGE_SIZE
+    chunk = state["publishers"][start : start + PAGE_SIZE]
+    buttons = [
+        [InlineKeyboardButton(f"🏢 {name} ({count})", callback_data=f"pub:{start + i}")]
+        for i, (name, count) in enumerate(chunk)
+    ]
+    nav = []
+    if state["page"] > 0:
+        nav.append(InlineKeyboardButton("⬅️ ရှေ့မျက်နှာ", callback_data="page:prev"))
+    nav.append(InlineKeyboardButton(f"📄 {state['page'] + 1}/{pages}", callback_data="page:none"))
+    if state["page"] < pages - 1:
+        nav.append(InlineKeyboardButton("နောက်မျက်နှာ ➡️", callback_data="page:next"))
+    if nav:
+        buttons.append(nav)
+    return InlineKeyboardMarkup(buttons)
+
+
+def _store_state(state: dict, msg) -> None:
+    state["list_message_id"] = msg.message_id
+    SEARCH_STATES[msg.message_id] = state
+    if len(SEARCH_STATES) > 500:
+        for mid in list(SEARCH_STATES)[: len(SEARCH_STATES) - 500]:
+            SEARCH_STATES.pop(mid, None)
+            SEARCH_LOCKS.pop(mid, None)
+
+
+async def all_books_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not store.books:
+        sent = await update.effective_message.reply_text("📭 စာအုပ် အချက်အလက် မရသေးပါ။")
+        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+        return
+    state = {
+        "mode": "allbooks",
+        "query": "စာအုပ်အားလုံး",
+        "results": [b["id"] for b in store.books],
+        "page": 0,
+        "list_message_id": None,
+    }
+    msg = await update.effective_message.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
+    _store_state(state, msg)
+    schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, msg.message_id)
+
+
+async def publishers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    pubs = _publisher_list()
+    if not pubs:
+        sent = await update.effective_message.reply_text("📭 စာအုပ် အချက်အလက် မရသေးပါ။")
+        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+        return
+    state = {"mode": "publishers", "publishers": pubs, "page": 0, "list_message_id": None}
+    msg = await update.effective_message.reply_text(_publisher_list_text(state), reply_markup=_publisher_list_keyboard(state))
+    _store_state(state, msg)
+    schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, msg.message_id)
+
+
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = _extract_query(update, context)
     if query is IGNORED:
@@ -557,11 +642,41 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             sent = await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
             schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
             return
-        pages = _page_count(len(state["results"]))
         page = state["page"] + (1 if data == "page:next" else -1)
-        state["page"] = max(0, min(pages - 1, page))
-        await cb.message.edit_text(_list_text(state), reply_markup=_list_keyboard(state))
+        if state.get("mode") == "publishers":
+            pages = _page_count(len(state["publishers"]))
+            state["page"] = max(0, min(pages - 1, page))
+            await cb.message.edit_text(_publisher_list_text(state), reply_markup=_publisher_list_keyboard(state))
+        else:
+            pages = _page_count(len(state["results"]))
+            state["page"] = max(0, min(pages - 1, page))
+            await cb.message.edit_text(_list_text(state), reply_markup=_list_keyboard(state))
         schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, cb.message.message_id)
+        return
+    if data.startswith("pub:"):
+        state = SEARCH_STATES.get(cb.message.message_id if cb.message else None)
+        if not state or state.get("mode") != "publishers":
+            sent = await cb.message.reply_text("🔍 ပြန်လုပ်ပါ — /publishers")
+            schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
+            return
+        idx = int(data.split(":", 1)[1])
+        if idx < 0 or idx >= len(state["publishers"]):
+            return
+        name, _ = state["publishers"][idx]
+        books = [b for b in store.books if b["publisher"] == name]
+        if not books:
+            await cb.answer("😕 စာအုပ် မရှိပါ။")
+            return
+        book_state = {
+            "mode": "pubbooks",
+            "query": name,
+            "results": [b["id"] for b in books],
+            "page": 0,
+            "list_message_id": None,
+        }
+        msg = await cb.message.reply_text(_list_text(book_state), reply_markup=_list_keyboard(book_state))
+        _store_state(book_state, msg)
+        schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, msg.message_id)
         return
     if data == "page:back":
         if not state:
@@ -793,6 +908,8 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("demo", demo_notify))
+    app.add_handler(CommandHandler("books", all_books_command))
+    app.add_handler(CommandHandler("publishers", publishers_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))

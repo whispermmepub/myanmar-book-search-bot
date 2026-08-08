@@ -34,6 +34,25 @@ COL_DESC = 9
 _PUNCT_RE = re.compile(r"[.,!?()\[\]{}<>\"'`~@#$%^&*_\-+=/\\|:;，。！？（）“”‘’]", re.UNICODE)
 _SPACE_RE = re.compile(r"\s+", re.UNICODE)
 
+# Publisher names that appear in the sheet with spelling variations are merged
+# into one canonical name so the same publisher does not show up separately.
+PUBLISHER_ALIASES = {
+    "ဆုပြည့်စုံထွန်း": "ဆုပြည့်စုံထွန်းစာပေ",
+    "ဆုပြည်စုံထွန်းစာပေ": "ဆုပြည့်စုံထွန်းစာပေ",
+    "ွQuality Publishing House": "Quality Publishing House",
+    "Little Yangon Publcation": "Little Yangon Publication",
+    "ဆောင်းစုရတီစာပေ": "ဆောင်းစုရတီ",
+    "ပန်းဆက်လမ်းစာပေ": "ပန်းဆက်လမ်း",
+    "လင်းသစ်ရောင်စဉ်": "လင်းသစ်ရောင်စဉ် စာအုပ်တိုက်",
+    "Linn Thit Pyi လင်းသစ်ပြည် စာပေ": "Linn Thit Pyi လင်းသစ်ပြည်စာပေ",
+}
+
+
+def canonical_publisher(name: str) -> str:
+    """Drop zero-width spaces, then merge known spelling variants."""
+    name = name.replace("\u200b", "").strip()
+    return PUBLISHER_ALIASES.get(name, name)
+
 
 def normalize(text: str) -> str:
     """Lowercase, unify unicode, drop spaces and punctuation."""
@@ -83,7 +102,7 @@ class BookStore:
                 continue
             title = (row[COL_TITLE] or "").strip()
             author = (row[COL_AUTHOR] or "").strip()
-            publisher = (row[COL_PUBLISHER] or "").strip()
+            publisher = canonical_publisher(row[COL_PUBLISHER] or "")
             price = (row[COL_PRICE] or "").strip()
             edition = (row[COL_EDITION] or "").strip()
             image_url = (row[COL_IMAGE] or "").strip()
