@@ -491,9 +491,6 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
         )
         schedule_auto_delete(context, target.chat.id, target.chat.type, sent.message_id)
         return
-    if len(results) == 1:
-        await send_book_card(target, results[0], context=context)
-        return
     state = {
         "query": query,
         "results": [b["id"] for b in results],
