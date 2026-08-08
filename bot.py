@@ -155,6 +155,12 @@ async def send_search_results(target, query: str, bot_username: str | None = Non
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = _extract_query(update, context)
+    log.info(
+        "Query from %s (chat %s): %r",
+        update.effective_user.username if update.effective_user else "?",
+        update.effective_chat.type if update.effective_chat else "?",
+        query,
+    )
     if query is None:
         if update.effective_message.chat.type in ("group", "supergroup"):
             await update.effective_message.reply_text(
@@ -180,6 +186,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = (update.inline_query.query or "").strip()
+    log.info("Inline query from user %s: %r", update.inline_query.from_user.username, query)
     if not query:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
