@@ -1,6 +1,5 @@
 """Telegram bot that searches Myanmar books by title or author."""
 
-import asyncio
 import logging
 import os
 
@@ -53,14 +52,12 @@ def build_caption(book: dict) -> str:
     return "\n".join(lines)
 
 
-async def refresh_loop() -> None:
-    while True:
-        try:
-            await store.load()
-            log.info("Data refreshed: %d books", len(store.books))
-        except Exception as exc:  # noqa: BLE001
-            log.error("Data refresh failed: %s", exc)
-        await asyncio.sleep(REFRESH_HOURS * 3600)
+async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await store.load()
+        log.info("Data refreshed: %d books", len(store.books))
+    except Exception as exc:  # noqa: BLE001
+        log.error("Data refresh failed: %s", exc)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -160,16 +157,12 @@ def _build_app() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
     return app
 
-async def run() -> None:
-    app = _build_app()
-    asyncio.get_running_loop().create_task(refresh_loop())
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
 def main() -> None:
     if not BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
-    asyncio.run(run())
+    app = _build_app()
+    app.job_queue.run_repeating(refresh_job, interval=REFRESH_HOURS * 3600, first=5)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
