@@ -7,6 +7,7 @@ Works in:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -55,6 +56,53 @@ SEARCH_STATES: dict[int, dict] = {}
 # One lock per list message, so rapid taps can never show two cards at once.
 SEARCH_LOCKS: dict[int, asyncio.Lock] = {}
 
+# Telegram photo file_ids per cover, so repeat views need no download at all.
+FILE_ID_STORE = "/tmp/book_file_ids.json"
+file_ids: dict[str, str] = {}
+
+# Background cover prefetch, so the first tap on any book is already cached.
+WARM_QUEUE: asyncio.Queue = asyncio.Queue()
+WARM_SEEN: set[str] = set()
+
+
+def load_file_ids() -> None:
+    try:
+        with open(FILE_ID_STORE, encoding="utf-8") as fh:
+            file_ids.update(json.load(fh))
+        log.info("Loaded %d cached file_ids", len(file_ids))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def save_file_id(image_id: str, file_id: str) -> None:
+    file_ids[image_id] = file_id
+    try:
+        with open(FILE_ID_STORE, "w", encoding="utf-8") as fh:
+            json.dump(file_ids, fh)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def warm_worker() -> None:
+    while True:
+        image_id = await WARM_QUEUE.get()
+        try:
+            await images.get(image_id)
+        except Exception:  # noqa: BLE001
+            log.exception("Cover prefetch failed for %s", image_id)
+        finally:
+            WARM_QUEUE.task_done()
+
+
+def enqueue_uncached_covers() -> None:
+    for b in store.books:
+        iid = b["image_id"]
+        if iid in WARM_SEEN or images.exists(iid):
+            continue
+        WARM_SEEN.add(iid)
+        WARM_QUEUE.put_nowait(iid)
+    log.info("Cover prefetch queue size: %d", WARM_QUEUE.qsize())
+
 
 def build_caption(book: dict) -> str:
     lines = [
@@ -84,6 +132,7 @@ async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await store.load()
         log.info("Data refreshed: %d books", len(store.books))
+        enqueue_uncached_covers()
     except Exception as exc:  # noqa: BLE001
         log.error("Data refresh failed: %s", exc)
 
@@ -184,12 +233,19 @@ def schedule_auto_delete(context: ContextTypes.DEFAULT_TYPE, chat, message_id: i
 
 async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE | None = None, reply_markup=None):
     caption = build_caption(book)
-    path = await images.get(book["image_id"])
-    if path:
-        with open(path, "rb") as fh:
-            sent = await target.reply_photo(photo=fh, caption=caption, reply_markup=reply_markup)
+    image_id = book["image_id"]
+    saved_file_id = file_ids.get(image_id)
+    if saved_file_id:
+        sent = await target.reply_photo(photo=saved_file_id, caption=caption, reply_markup=reply_markup)
     else:
-        sent = await target.reply_text(caption, reply_markup=reply_markup)
+        path = await images.get(image_id)
+        if path:
+            with open(path, "rb") as fh:
+                sent = await target.reply_photo(photo=fh, caption=caption, reply_markup=reply_markup)
+            if sent.photo:
+                save_file_id(image_id, sent.photo[-1].file_id)
+        else:
+            sent = await target.reply_text(caption, reply_markup=reply_markup)
     if context:
         schedule_auto_delete(context, target.chat, sent.message_id)
     return sent
@@ -391,6 +447,9 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def post_init(application: Application) -> None:
     me = await application.bot.get_me()
     log.info("Bot started: @%s (%s)", me.username, me.first_name)
+    load_file_ids()
+    for _ in range(4):
+        application.create_task(warm_worker())
     if OWNER_ID:
         try:
             await application.bot.send_message(
