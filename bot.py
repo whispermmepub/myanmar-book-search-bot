@@ -12,6 +12,7 @@ import logging
 import os
 import random
 import re
+import time
 
 from telegram import (
     InlineKeyboardButton,
@@ -63,6 +64,19 @@ SEARCH_LOCKS: dict[int, asyncio.Lock] = {}
 SUMMARY_VIEWS: dict[str, int] = {}
 SUMMARY_LOCKS: dict[str, asyncio.Lock] = {}
 
+# "Order this book" dedupe: card_message_id:book_id -> last tap timestamp.
+ORDER_VIEWS: dict[str, float] = {}
+ORDER_LOCKS: dict[str, asyncio.Lock] = {}
+
+# Publisher name -> Telegram username (no @), loaded from publisher_contacts.json.
+PUBLISHER_CONTACTS_FILE = "publisher_contacts.json"
+publisher_contacts: dict[str, str] = {}
+
+# Username -> user id, learned from anyone who ever messages the bot.
+# Used to deliver order requests to publisher accounts that have /start'ed the bot.
+USER_IDS_FILE = "/tmp/user_ids.json"
+user_ids: dict[str, int] = {}
+
 # Telegram photo file_ids per cover, so repeat views need no download at all.
 FILE_ID_STORE = "/tmp/book_file_ids.json"
 file_ids: dict[str, str] = {}
@@ -88,6 +102,60 @@ def save_file_id(image_id: str, file_id: str) -> None:
             json.dump(file_ids, fh)
     except Exception:  # noqa: BLE001
         pass
+
+
+def load_publisher_contacts() -> None:
+    global publisher_contacts
+    try:
+        with open(PUBLISHER_CONTACTS_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        publisher_contacts = {k: v for k, v in data.items() if not k.startswith("_") and v}
+        log.info("Loaded %d publisher contacts", len(publisher_contacts))
+    except Exception:  # noqa: BLE001
+        publisher_contacts = {}
+
+
+def publisher_contact(book: dict) -> str | None:
+    """Telegram username (no @) for the book's publisher, if configured."""
+    name = (book.get("publisher") or "").strip()
+    if not name:
+        return None
+    direct = publisher_contacts.get(name)
+    if direct:
+        return direct
+    folded = name.casefold()
+    for key, val in publisher_contacts.items():
+        if key.casefold() == folded:
+            return val
+    return None
+
+
+def load_user_ids() -> None:
+    try:
+        with open(USER_IDS_FILE, encoding="utf-8") as fh:
+            user_ids.update(json.load(fh))
+        log.info("Loaded %d known user ids", len(user_ids))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def save_user_ids() -> None:
+    try:
+        with open(USER_IDS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(user_ids, fh)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def record_user(update: Update) -> None:
+    """Remember username -> user id so orders can be delivered to that account."""
+    user = update.effective_user
+    if not user or not user.username:
+        return
+    key = user.username.casefold().lstrip("@")
+    if user_ids.get(key) != user.id:
+        user_ids[key] = user.id
+        save_user_ids()
 
 
 # Known books (dedupe keys) + notification subscribers, persisted to disk.
@@ -218,6 +286,8 @@ def _card_keyboard(book: dict, back: bool = False) -> InlineKeyboardMarkup | Non
     rows = []
     if description_was_truncated(book):
         rows.append([InlineKeyboardButton("📖 အညွှန်းဖတ်ရန်", callback_data=f"summary:{book['id']}")])
+    if publisher_contact(book):
+        rows.append([InlineKeyboardButton("🛒 စာအုပ်မှာရန်", callback_data=f"order:{book['id']}")])
     if back:
         rows.append([InlineKeyboardButton("📚 စာရင်းပြန်ကြည့်မယ်", callback_data="page:back")])
     return InlineKeyboardMarkup(rows) if rows else None
@@ -234,10 +304,11 @@ async def send_card_to_chat(
     caption: str | None = None,
     reply_markup=None,
     context: ContextTypes.DEFAULT_TYPE | None = None,
+    buttons: bool = True,
 ):
     """Send a book card (photo + details) to an arbitrary chat id."""
     caption = caption or build_caption(book)
-    markup = reply_markup if reply_markup is not None else _card_keyboard(book)
+    markup = reply_markup if reply_markup is not None else (_card_keyboard(book) if buttons else None)
     image_id = book["image_id"]
     saved_file_id = file_ids.get(image_id)
     if saved_file_id:
@@ -252,6 +323,47 @@ async def send_card_to_chat(
         else:
             sent = await bot.send_message(chat_id=chat_id, text=caption, reply_markup=markup)
     return sent
+
+
+def _orderer_block(update: Update) -> str:
+    user = update.effective_user
+    if not user:
+        return ""
+    lines = ["\n\n🙋 ဝယ်ယူလိုသူ:"]
+    if user.full_name:
+        lines.append(f" {user.full_name}")
+    if user.username:
+        lines.append(f" (@{user.username})")
+    lines.append(f"\n🔗 ဆက်သွယ်ရန်: tg://user?id={user.id}")
+    return "".join(lines)
+
+
+async def send_order_to_publisher(bot, book: dict, update: Update) -> tuple[bool, str | None]:
+    """Deliver the book card + orderer info to the publisher's Telegram DM.
+
+    Returns (delivered, username). Delivery only works for publishers who have
+    started the bot at least once (so the bot knows their user id).
+    """
+    username = publisher_contact(book)
+    if not username:
+        return False, None
+    uid = user_ids.get(username.casefold().lstrip("@"))
+    if not uid:
+        return False, username
+    caption = build_caption(book) + _orderer_block(update)
+    try:
+        await send_card_to_chat(bot, uid, book, caption=caption, buttons=False)
+        if description_was_truncated(book):
+            desc = (book.get("description") or "").strip()
+            await bot.send_message(
+                chat_id=uid,
+                text=f"📖 {book['title']} — {book['author']}\n\n📝 အညွှန်း (အပြည့်အစုံ):\n\n{desc}",
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Order delivery to %s failed for %r: %s", username, book["title"], exc)
+        return False, username
+    log.info("Order request for %r sent to %s by user %s", book["title"], username, update.effective_user.id if update.effective_user else "?")
+    return True, username
 
 
 def new_book_caption(book: dict) -> str:
@@ -280,6 +392,7 @@ async def announce_new_books(context: ContextTypes.DEFAULT_TYPE, books: list[dic
 
 async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
+        load_publisher_contacts()
         await store.load()
         log.info("Data refreshed: %d books", len(store.books))
         enqueue_uncached_covers()
@@ -296,6 +409,7 @@ async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_user(update)
     if update.effective_chat and update.effective_chat.type == "private":
         add_subscriber(update.effective_chat.id)
     bot = context.bot.username
@@ -378,6 +492,9 @@ async def delete_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for key in [k for k in SUMMARY_VIEWS if k.startswith(prefix) or SUMMARY_VIEWS.get(k) == message_id]:
         SUMMARY_VIEWS.pop(key, None)
         SUMMARY_LOCKS.pop(key, None)
+    for key in [k for k in ORDER_VIEWS if k.startswith(prefix)]:
+        ORDER_VIEWS.pop(key, None)
+        ORDER_LOCKS.pop(key, None)
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         log.info("Auto-deleted message %s in chat %s", message_id, chat_id)
@@ -481,6 +598,7 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
 
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_user(update)
     query = _extract_query(update, context)
     if query is IGNORED:
         return
@@ -518,6 +636,7 @@ async def _delete_card_summaries(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cb = update.callback_query
     await cb.answer()
+    record_user(update)
     data = cb.data or ""
     state = SEARCH_STATES.get(cb.message.message_id if cb.message else None) or next(
         (s for s in SEARCH_STATES.values() if s.get("card_message_id") == cb.message.message_id),
@@ -630,6 +749,53 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     SUMMARY_VIEWS.pop(old_key, None)
                     SUMMARY_LOCKS.pop(old_key, None)
         return
+    if data.startswith("order:"):
+        book_id = int(data.split(":", 1)[1])
+        book = store.by_id(book_id)
+        if not book:
+            sent = await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။")
+            schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
+            return
+        username = publisher_contact(book)
+        if not username:
+            sent = await cb.message.reply_text(
+                f"😕 ဒီစာအုပ်တိုက် ({book['publisher']}) ရဲ့ Telegram မထည့်ရသေးပါ။\n"
+                "တိုက်ရိုက်မေးမြန်းကြည့်ပါ။"
+            )
+            schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
+            return
+        key = f"{cb.message.chat_id}:{cb.message.message_id}:{book_id}"
+        lock = ORDER_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            if time.time() - ORDER_VIEWS.get(key, 0) < 30:
+                await cb.answer("✅ ပို့ပြီးသားပါ")
+                return
+            delivered, username = await send_order_to_publisher(context.bot, book, update)
+            ORDER_VIEWS[key] = time.time()
+            if len(ORDER_VIEWS) > 1000:
+                for old_key in list(ORDER_VIEWS)[: len(ORDER_VIEWS) - 1000]:
+                    ORDER_VIEWS.pop(old_key, None)
+                    ORDER_LOCKS.pop(old_key, None)
+        if delivered:
+            await cb.answer("✅ စာအုပ်တိုက်ဆီ ပို့ပြီးပါပြီ")
+            sent = await cb.message.reply_text(
+                f"✅ `{book['title']}` ရဲ့ အချက်အလက် ကို စာအုပ်တိုက် ({book['publisher']}) ဆီ ပို့လိုက်ပါပြီ။\n"
+                "အောက်က ခလုတ်နဲ့ သူတို့ဆီ တိုက်ရိုက်ဆက်သွယ်ပြီး စာအုပ်ရှိ/မရှိ ဆက်မေးလို့ရပါတယ် 👇",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("💬 စာအုပ်တိုက်နဲ့ စကားပြောရန်", url=f"https://t.me/{username}")]]
+                ),
+            )
+        else:
+            await cb.answer("⚠️ တိုက်ရိုက်ဆက်သွယ်ပါ")
+            sent = await cb.message.reply_text(
+                f"⚠️ ဒီစာအုပ်တိုက်က bot ကို စတင်မသုံးရသေးတာမို့ bot ကနေ အလိုအလျောက် မပို့နိုင်ပါ။\n"
+                f"အောက်က ခလုတ်နဲ့ တိုက်ရိုက်ဆက်သွယ်ပြီး စာအုပ်အချက်အလက် ပြန်ပို့လို့ရပါတယ် 👇",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("💬 စာအုပ်တိုက်နဲ့ စကားပြောရန်", url=f"https://t.me/{username}")]]
+                ),
+            )
+        schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
+        return
 
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -721,6 +887,8 @@ async def post_init(application: Application) -> None:
     log.info("Bot started: @%s (%s)", me.username, me.first_name)
     load_persisted_state()
     load_file_ids()
+    load_publisher_contacts()
+    load_user_ids()
     for _ in range(4):
         application.create_task(warm_worker())
     if OWNER_ID:
