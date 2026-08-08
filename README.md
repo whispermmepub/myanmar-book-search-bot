@@ -42,3 +42,14 @@ railway variables --set TELEGRAM_BOT_TOKEN=... --set TELEGRAM_OWNER_ID=...
 Search matching: case-insensitive၊ Unicode-normalized၊ space/punctuation ဖယ်၍ substring နှင့် token match လုပ်သည်။
 Group များတွင် bot ၏ reply message များကို ပြသပြီး ၅ မိနစ်အကြာတွင် auto-delete လုပ်သည် (DM တွင် မဖျက်ပါ)။
 အချက်အလက် ပြည့်စုံသော စာအုပ်များသာ (ကာဗာပုံ၊ စာရေးသူ၊ အမည်၊ ဈေး၊ အကြိမ်၊ တိုက်) ပြသသည်။
+
+## Fresh deploy on a new Railway account
+Code, data source and cover images are all public — only the Telegram token is a secret.
+1. In the new Railway account: **New Project → Deploy from GitHub repo** → `whispermmepub/myanmar-book-search-bot`.
+2. Set service variables:
+   - `TELEGRAM_BOT_TOKEN` = the same bot token (e.g. `8982557611:...`)
+   - `TELEGRAM_OWNER_ID` = `7930855703` (optional, startup notification)
+   - `REFRESH_HOURS` = `1` (optional; default 6)
+3. Deploy and check logs for `Bot started: @saroatsarpay_bot` and `Loaded 547 books`.
+4. **Stop/delete the old service or account first** — running two instances with the same bot token causes a `getUpdates` conflict.
+5. After deploy the cover cache re-warms in ~5 minutes (ephemeral disk), then everything is fast again.
