@@ -300,10 +300,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 message_id=state["list_message_id"],
                 reply_markup=_list_keyboard(state),
             )
-        except Exception:  # noqa: BLE001
-            sent = await cb.message.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
-            schedule_auto_delete(context, cb.message.chat, sent.message_id)
-            return
+        except Exception as exc:  # noqa: BLE001
+            if "not modified" not in str(exc).lower():
+                sent = await cb.message.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
+                schedule_auto_delete(context, cb.message.chat, sent.message_id)
+                return
         schedule_auto_delete(context, cb.message.chat, state["list_message_id"])
         return
     if data.startswith("book:"):
