@@ -11,6 +11,12 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 - `/stats` — စာအုပ်အရေအတွက်နှင့် နောက်ဆုံး refresh အချိန်
 - အခြား message မှန်သမျှ — စာအုပ်/စာရေးသူ ရှာဖွေမှု (တစ်မျက်နှာလျှင် ၁၀ အုပ်၊ `နောက်မျက်နှာ ➡️` ဖြင့် ဆက်ကြည့်နိုင်၊ နာမည်နှိပ်လျှင် ကာဗာပုံ + အသေးစိတ် ပြသည်)
 
+## New-book notifications
+- Bot သည် Google Sheet တွင် စာအုပ်အသစ်ပေါ်လာတိုင်း (`NOTIFY_GROUP_ID` သတ်မှတ်ထားသော) group သို့ ကာဗာပုံ + အချက်အလက်များဖြင့် အလိုအလျောက် အသိပေးသည် (5 မိနစ်အကြာတွင် ဖျက်သည်)။
+- DM အသိပေးချက်: bot ကို private chat တွင် `/start` သို့မဟုတ် စာတစ်စောင်ပို့လိုက်ပါက subscriber အဖြစ် အလိုအလျောက်ပါဝင်ပြီး စာအုပ်အသစ်တိုင်း DM ရောက်သည်။ `/unsubscribe` ဖြင့် ရပ်နိုင်သည်။
+- Env vars: `NOTIFY_GROUP_ID` (group chat id, optional), `NOTIFY_MAX_PER_REFRESH` (default 25).
+- Owner test: `/demo` command ဖြင့် ရှိပြီးသားစာအုပ်တစ်အုပ်ကို "စာအုပ်အသစ်" ပုံစံဖြင့် စမ်းပို့ကြည့်နိုင်သည်။
+
 ## Group / Inline သုံးနည်း
 - **Group:** bot ကို group ထဲထည့်ပြီး Admin တင်ပါ။ ပြီးရင် `@saroatsarpay_bot စာအုပ်နာမည်` (သို့) `@saroatsarpay_bot စာရေးသူနာမည်` ရိုက်ပါ — လူတိုင်း သုံးနိုင်ပါသည်။
 - **Inline mode:** BotFather မှာ inline mode ဖွင့်ထားပါက ဘယ် chat မှာမဆို `@saroatsarpay_bot နာမည်` ရိုက်လိုက်ရုံဖြင့် ရလဒ်များ ပေါ်လာပါမည်။

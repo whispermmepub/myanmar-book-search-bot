@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 
 from telegram import (
@@ -83,6 +84,70 @@ def save_file_id(image_id: str, file_id: str) -> None:
         pass
 
 
+# Known books (dedupe keys) + notification subscribers, persisted to disk.
+KNOWN_BOOKS_FILE = "/tmp/known_books.json"
+SUBSCRIBERS_FILE = "/tmp/subscribers.json"
+known_keys: set[tuple] = set()
+subscribers: set[int] = set()
+NOTIFY_GROUP_ID = os.environ.get("NOTIFY_GROUP_ID", "")
+NOTIFY_MAX_PER_REFRESH = int(os.environ.get("NOTIFY_MAX_PER_REFRESH", "25"))
+
+
+def load_json_set(path: str) -> set:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return {tuple(x) for x in json.load(fh)}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def save_json_set(path: str, items: set) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump([list(x) for x in items], fh)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_subscriber_ids() -> set[int]:
+    try:
+        with open(SUBSCRIBERS_FILE, encoding="utf-8") as fh:
+            return {int(x) for x in json.load(fh)}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def save_subscriber_ids(items: set) -> None:
+    try:
+        with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(sorted(items), fh)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_persisted_state() -> None:
+    global known_keys, subscribers
+    known_keys = load_json_set(KNOWN_BOOKS_FILE)
+    subscribers = load_subscriber_ids()
+    log.info("Known books: %d, subscribers: %d", len(known_keys), len(subscribers))
+
+
+def add_subscriber(chat_id: int) -> bool:
+    if chat_id in subscribers:
+        return False
+    subscribers.add(chat_id)
+    save_subscriber_ids(subscribers)
+    return True
+
+
+def remove_subscriber(chat_id: int) -> bool:
+    if chat_id not in subscribers:
+        return False
+    subscribers.discard(chat_id)
+    save_subscriber_ids(subscribers)
+    return True
+
+
 async def warm_worker() -> None:
     while True:
         image_id = await WARM_QUEUE.get()
@@ -128,16 +193,67 @@ def cover_url(book: dict) -> str:
     return f"https://drive.google.com/uc?export=view&id={book['image_id']}"
 
 
+async def send_card_to_chat(bot, chat_id: int, book: dict, caption: str | None = None, reply_markup=None):
+    """Send a book card (photo + details) to an arbitrary chat id."""
+    caption = caption or build_caption(book)
+    image_id = book["image_id"]
+    saved_file_id = file_ids.get(image_id)
+    if saved_file_id:
+        return await bot.send_photo(chat_id=chat_id, photo=saved_file_id, caption=caption, reply_markup=reply_markup)
+    path = await images.get(image_id)
+    if path:
+        with open(path, "rb") as fh:
+            sent = await bot.send_photo(chat_id=chat_id, photo=fh, caption=caption, reply_markup=reply_markup)
+        if sent.photo:
+            save_file_id(image_id, sent.photo[-1].file_id)
+        return sent
+    return await bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup)
+
+
+def new_book_caption(book: dict) -> str:
+    return "🆕 စာအုပ်အသစ် ရောက်ရှိပါပြီ!\n\n" + build_caption(book)
+
+
+async def announce_new_books(context: ContextTypes.DEFAULT_TYPE, books: list[dict]) -> None:
+    for book in books[:NOTIFY_MAX_PER_REFRESH]:
+        caption = new_book_caption(book)
+        targets = []
+        if NOTIFY_GROUP_ID:
+            try:
+                sent = await send_card_to_chat(context.bot, int(NOTIFY_GROUP_ID), book, caption=caption)
+                schedule_auto_delete(context, sent.chat.id, sent.chat.type, sent.message_id)
+                targets.append("group")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Group announce failed for %s: %s", book["title"], exc)
+        for uid in list(subscribers):
+            try:
+                await send_card_to_chat(context.bot, uid, book, caption=caption)
+                targets.append(str(uid))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("DM announce to %s failed for %s: %s", uid, book["title"], exc)
+        log.info("Announced new book %r to %s", book["title"], ", ".join(targets) or "nobody")
+
+
 async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await store.load()
         log.info("Data refreshed: %d books", len(store.books))
         enqueue_uncached_covers()
+        new_books = []
+        if known_keys:
+            new_books = [b for b in store.books if (b["title_n"], b["author_n"]) not in known_keys]
+        known_keys.update((b["title_n"], b["author_n"]) for b in store.books)
+        save_json_set(KNOWN_BOOKS_FILE, known_keys)
+        if new_books:
+            log.info("New books detected: %d", len(new_books))
+            await announce_new_books(context, new_books)
     except Exception as exc:  # noqa: BLE001
         log.error("Data refresh failed: %s", exc)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat and update.effective_chat.type == "private":
+        add_subscriber(update.effective_chat.id)
     bot = context.bot.username
     await update.effective_message.reply_text(
         "👋 မင်္ဂလာပါ!\n\n"
@@ -161,17 +277,17 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"🔄 နောက်ဆုံး data ပြန်ဆွဲချိန်: {loaded} (UTC)\n"
         f"⏰ အလိုအလျောက် refresh: {REFRESH_HOURS:g} နာရီတစ်ခါ"
     )
-    schedule_auto_delete(context, update.effective_message.chat, sent.message_id)
+    schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if OWNER_ID and (not user or str(user.id) != str(OWNER_ID)):
         sent = await update.effective_message.reply_text("🔒 ဒီ command ကို bot ပိုင်ရှင်သာ သုံးနိုင်ပါတယ်။")
-        schedule_auto_delete(context, update.effective_message.chat, sent.message_id)
+        schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
         return
     sent = await update.effective_message.reply_text("🔄 စာအုပ်စာရင်း ပြန်ဆွဲနေပါတယ်…")
-    schedule_auto_delete(context, update.effective_message.chat, sent.message_id)
+    schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
     try:
         await store.load()
         loaded = store.loaded_at.strftime("%Y-%m-%d %H:%M:%S") if store.loaded_at else "—"
@@ -221,14 +337,14 @@ async def delete_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         pass  # already deleted or cannot be deleted
 
 
-def schedule_auto_delete(context: ContextTypes.DEFAULT_TYPE, chat, message_id: int, delay: float = 300) -> None:
+def schedule_auto_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, chat_type: str, message_id: int, delay: float = 300) -> None:
     """Delete a bot message after `delay` seconds, only in groups (not in DMs)."""
-    if chat.type not in ("group", "supergroup"):
+    if chat_type not in ("group", "supergroup"):
         return
-    name = f"del:{chat.id}:{message_id}"
+    name = f"del:{chat_id}:{message_id}"
     for job in context.job_queue.get_jobs_by_name(name):
         job.schedule_removal()
-    context.job_queue.run_once(delete_job, delay, data=(chat.id, message_id), name=name)
+    context.job_queue.run_once(delete_job, delay, data=(chat_id, message_id), name=name)
 
 
 async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE | None = None, reply_markup=None):
@@ -247,7 +363,7 @@ async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE 
         else:
             sent = await target.reply_text(caption, reply_markup=reply_markup)
     if context:
-        schedule_auto_delete(context, target.chat, sent.message_id)
+        schedule_auto_delete(context, target.chat.id, target.chat.type, sent.message_id)
     return sent
 
 
@@ -294,7 +410,7 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
             "😕 ဒီစာအုပ် (သို့) စာရေးသူ မတွေ့ပါဘူး။\n"
             "နာမည် အနည်းငယ်ပဲ ရိုက်ကြည့်ပါ။"
         )
-        schedule_auto_delete(context, target.chat, sent.message_id)
+        schedule_auto_delete(context, target.chat.id, target.chat.type, sent.message_id)
         return
     if len(results) == 1:
         await send_book_card(target, results[0], context=context)
@@ -312,7 +428,7 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
         for mid in list(SEARCH_STATES)[: len(SEARCH_STATES) - 500]:
             SEARCH_STATES.pop(mid, None)
             SEARCH_LOCKS.pop(mid, None)
-    schedule_auto_delete(context, target.chat, msg.message_id)
+    schedule_auto_delete(context, target.chat.id, target.chat.type, msg.message_id)
 
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -325,12 +441,14 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         update.effective_chat.type if update.effective_chat else "?",
         query,
     )
+    if update.effective_chat and update.effective_chat.type == "private":
+        add_subscriber(update.effective_chat.id)
     if query is None:
         sent = await update.effective_message.reply_text(
             f"🤖 စာအုပ်နာမည် (သို့) စာရေးသူနာမည် ရိုက်ပြီး ရှာပါ။\n"
             f"ဥပမာ: @{context.bot.username} မြစ်ရိုင်း"
         )
-        schedule_auto_delete(context, update.effective_message.chat, sent.message_id)
+        schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
         return
     await send_search_results(update.effective_message, query, context)
 
@@ -348,18 +466,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data in ("page:next", "page:prev"):
         if not state:
             sent = await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
-            schedule_auto_delete(context, cb.message.chat, sent.message_id)
+            schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
             return
         pages = _page_count(len(state["results"]))
         page = state["page"] + (1 if data == "page:next" else -1)
         state["page"] = max(0, min(pages - 1, page))
         await cb.message.edit_text(_list_text(state), reply_markup=_list_keyboard(state))
-        schedule_auto_delete(context, cb.message.chat, cb.message.message_id)
+        schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, cb.message.message_id)
         return
     if data == "page:back":
         if not state:
             sent = await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
-            schedule_auto_delete(context, cb.message.chat, sent.message_id)
+            schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
             return
         # remove the detail card so only the list remains visible
         card_id = state.get("card_message_id") or cb.message.message_id
@@ -378,16 +496,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as exc:  # noqa: BLE001
             if "not modified" not in str(exc).lower():
                 sent = await cb.message.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
-                schedule_auto_delete(context, cb.message.chat, sent.message_id)
+                schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
                 return
-        schedule_auto_delete(context, cb.message.chat, state["list_message_id"])
+        schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, state["list_message_id"])
         return
     if data.startswith("book:"):
         book_id = int(data.split(":", 1)[1])
         book = store.by_id(book_id)
         if not book:
             sent = await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။ ထပ်ရှာကြည့်ပါ။")
-            schedule_auto_delete(context, cb.message.chat, sent.message_id)
+            schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
             return
         if not state:
             await send_book_card(cb.message, book, context=context)
@@ -444,9 +562,69 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.inline_query.answer(items, cache_time=300, is_personal=True)
 
 
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if chat and chat.type == "private":
+        added = add_subscriber(chat.id)
+        sent = await update.effective_message.reply_text(
+            "✅ စာအုပ်အသစ် ရောက်လာတိုင်း ဒီ DM ထဲ အသိပေးပါမယ်။\n"
+            "ရပ်ချင်ရင် /unsubscribe ရိုက်ပါ။"
+            if added
+            else "🔔 အသိပေးချက် ရပြီးသား ဖြစ်နေပါပြီ။"
+        )
+    else:
+        sent = await update.effective_message.reply_text("ℹ️ ဒီ command ကို bot ရဲ့ DM မှာသာ သုံးလို့ရပါတယ်။")
+    schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if chat and chat.type == "private":
+        removed = remove_subscriber(chat.id)
+        sent = await update.effective_message.reply_text(
+            "🔕 အသိပေးချက် ရပ်လိုက်ပါပြီ။"
+            if removed
+            else "ℹ️ သင်က အသိပေးချက် မရထားပါဘူး။"
+        )
+    else:
+        sent = await update.effective_message.reply_text("ℹ️ ဒီ command ကို bot ရဲ့ DM မှာသာ သုံးလို့ရပါတယ်။")
+    schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
+
+
+async def demo_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: send one existing book formatted like a new-book announcement."""
+    user = update.effective_user
+    if OWNER_ID and (not user or str(user.id) != str(OWNER_ID)):
+        sent = await update.effective_message.reply_text("🔒 ဒီ command ကို bot ပိုင်ရှင်သာ သုံးနိုင်ပါတယ်။")
+        schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
+        return
+    if not store.books:
+        sent = await update.effective_message.reply_text("📭 စာအုပ် အချက်အလက် မရသေးပါ။")
+        schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
+        return
+    book = random.choice(store.books)
+    caption = new_book_caption(book)
+    done = []
+    if NOTIFY_GROUP_ID:
+        try:
+            sent = await send_card_to_chat(context.bot, int(NOTIFY_GROUP_ID), book, caption=caption)
+            schedule_auto_delete(context, sent.chat.id, sent.chat.type, sent.message_id)
+            done.append("group")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Demo group send failed: %s", exc)
+    sent = await send_card_to_chat(context.bot, update.effective_chat.id, book, caption=caption)
+    done.append("DM")
+    reply = await update.effective_message.reply_text(
+        f"✅ Demo ပို့ပြီးပါပြီ → {', '.join(done)}\n"
+        f"စာအုပ်: {book['title']} ({book['author']})"
+    )
+    schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, reply.message_id)
+
+
 async def post_init(application: Application) -> None:
     me = await application.bot.get_me()
     log.info("Bot started: @%s (%s)", me.username, me.first_name)
+    load_persisted_state()
     load_file_ids()
     for _ in range(4):
         application.create_task(warm_worker())
@@ -473,6 +651,9 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("refresh", refresh_command))
+    app.add_handler(CommandHandler("subscribe", subscribe))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    app.add_handler(CommandHandler("demo", demo_notify))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
