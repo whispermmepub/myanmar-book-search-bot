@@ -184,24 +184,30 @@ class ImageCache:
         path = self._path(image_id)
         if os.path.exists(path) and os.path.getsize(path) > 0:
             return path
-        url = f"https://drive.google.com/uc?export=view&id={image_id}"
-        for attempt in (1, 2):
-            try:
-                resp = await self._client.get(url)
-                resp.raise_for_status()
-                data = resp.content
-                if not data:
-                    continue
-                # Normalize every image to JPEG so Telegram can always display it.
-                img = Image.open(io.BytesIO(data))
-                img.thumbnail((1280, 1280))
-                if img.mode in ("RGBA", "P", "LA"):
-                    img = img.convert("RGB")
-                img.save(path, "JPEG", quality=88)
-                log.info("Cached cover %s (%d bytes)", image_id, len(data))
-                return path
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Image download attempt %d failed for %s: %s", attempt, image_id, exc)
-                if attempt == 2:
-                    return None
+        # Try the small thumbnail first (much faster than the full file),
+        # then fall back to the full-size export URL.
+        candidates = [
+            f"https://drive.google.com/thumbnail?id={image_id}&sz=w800",
+            f"https://drive.google.com/uc?export=view&id={image_id}",
+        ]
+        for url in candidates:
+            for attempt in (1, 2):
+                try:
+                    resp = await self._client.get(url)
+                    resp.raise_for_status()
+                    data = resp.content
+                    if not data:
+                        continue
+                    # Normalize every image to JPEG so Telegram can always display it.
+                    img = Image.open(io.BytesIO(data))  # raises if the response is not an image
+                    img.thumbnail((1280, 1280))
+                    if img.mode in ("RGBA", "P", "LA"):
+                        img = img.convert("RGB")
+                    img.save(path, "JPEG", quality=88)
+                    log.info("Cached cover %s via %s (%d bytes)", image_id, url, len(data))
+                    return path
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Image fetch attempt %d failed for %s via %s: %s", attempt, image_id, url, exc)
+                    if attempt == 2:
+                        break
         return None

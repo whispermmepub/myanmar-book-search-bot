@@ -6,6 +6,7 @@ Works in:
 - inline mode: @<bot_username> <query> anywhere shows inline results
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -51,6 +52,8 @@ IGNORED = object()  # message that should not trigger any bot reply
 # Search state per list message, so that ANY member who taps a button
 # gets the same list/back-button behaviour (not tied to one user).
 SEARCH_STATES: dict[int, dict] = {}
+# One lock per list message, so rapid taps can never show two cards at once.
+SEARCH_LOCKS: dict[int, asyncio.Lock] = {}
 
 
 def build_caption(book: dict) -> str:
@@ -158,6 +161,7 @@ def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | 
 async def delete_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id, message_id = context.job.data
     SEARCH_STATES.pop(message_id, None)
+    SEARCH_LOCKS.pop(message_id, None)
     for s in list(SEARCH_STATES.values()):
         if s.get("card_message_id") == message_id:
             s["card_message_id"] = None
@@ -248,6 +252,10 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
     msg = await target.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
     state["list_message_id"] = msg.message_id
     SEARCH_STATES[msg.message_id] = state
+    if len(SEARCH_STATES) > 500:
+        for mid in list(SEARCH_STATES)[: len(SEARCH_STATES) - 500]:
+            SEARCH_STATES.pop(mid, None)
+            SEARCH_LOCKS.pop(mid, None)
     schedule_auto_delete(context, target.chat, msg.message_id)
 
 
@@ -325,21 +333,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             sent = await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။ ထပ်ရှာကြည့်ပါ။")
             schedule_auto_delete(context, cb.message.chat, sent.message_id)
             return
-        if state:
+        if not state:
+            await send_book_card(cb.message, book, context=context)
+            return
+        # Serialize taps on this list so a double-tap can never show two cards.
+        lock = SEARCH_LOCKS.setdefault(cb.message.message_id, asyncio.Lock())
+        async with lock:
+            state = SEARCH_STATES.get(cb.message.message_id) or state
+            if not state:
+                await send_book_card(cb.message, book, context=context)
+                return
+            # Already showing this exact book? Nothing to do (avoids duplicates).
+            if state.get("current_book_id") == book_id:
+                return
+            # Remove the previously shown card right away.
             old_card = state.get("card_message_id")
             if old_card:
                 try:
                     await context.bot.delete_message(chat_id=cb.message.chat_id, message_id=old_card)
                 except Exception:  # noqa: BLE001
                     pass
-        back_kb = None
-        if state:
+                state["card_message_id"] = None
             back_kb = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("📚 စာရင်းပြန်ကြည့်မယ်", callback_data="page:back")]]
             )
-        sent = await send_book_card(cb.message, book, context=context, reply_markup=back_kb)
-        if state:
+            sent = await send_book_card(cb.message, book, context=context, reply_markup=back_kb)
             state["card_message_id"] = sent.message_id
+            state["current_book_id"] = book_id
+        return
 
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
