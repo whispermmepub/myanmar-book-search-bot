@@ -114,9 +114,9 @@ def publisher_channel(book: dict) -> str | None:
     direct = publisher_channels.get(name)
     if direct:
         return _channel_link(direct)
-    folded = name.casefold()
+    folded = name.replace("\u200b", "").casefold()
     for key, val in publisher_channels.items():
-        if key.casefold() == folded:
+        if key.replace("\u200b", "").casefold() == folded:
             return _channel_link(val)
     return None
 
