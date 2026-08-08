@@ -43,7 +43,8 @@ REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
 store = BookStore()
 images = ImageCache()
 
-RESULTS_LIMIT = 10
+PAGE_SIZE = 10
+RESULT_CAP = 100
 
 
 def build_caption(book: dict) -> str:
@@ -121,18 +122,54 @@ def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | 
     return query or None
 
 
-async def send_book_card(target, book: dict) -> None:
+async def send_book_card(target, book: dict, reply_markup=None) -> None:
     caption = build_caption(book)
     path = await images.get(book["image_id"])
     if path:
         with open(path, "rb") as fh:
-            await target.reply_photo(photo=fh, caption=caption)
+            await target.reply_photo(photo=fh, caption=caption, reply_markup=reply_markup)
     else:
-        await target.reply_text(caption)
+        await target.reply_text(caption, reply_markup=reply_markup)
 
 
-async def send_search_results(target, query: str, bot_username: str | None = None) -> None:
-    results = store.search(query, limit=RESULTS_LIMIT)
+def _page_count(total: int) -> int:
+    return max(1, -(-total // PAGE_SIZE))
+
+
+def _list_text(state: dict) -> str:
+    total = len(state["results"])
+    pages = _page_count(total)
+    lines = [f"🔍 `{state['query']}` အတွက် စာအုပ် {total} ခု တွေ့ပါတယ်။"]
+    if pages > 1:
+        lines.append(f"📄 မျက်နှာ {state['page'] + 1}/{pages}")
+    lines.append("\nကြည့်ချင်တဲ့ စာအုပ်ကို ရွေးပါ 👇")
+    return "\n".join(lines)
+
+
+def _list_keyboard(state: dict) -> InlineKeyboardMarkup:
+    ids = state["results"]
+    total = len(ids)
+    pages = _page_count(total)
+    start = state["page"] * PAGE_SIZE
+    chunk = ids[start : start + PAGE_SIZE]
+    books = [b for i in chunk if (b := store.by_id(i))]
+    buttons = [
+        [InlineKeyboardButton(f"📖 {b['title']} — {b['author']}", callback_data=f"book:{b['id']}")]
+        for b in books
+    ]
+    nav = []
+    if state["page"] > 0:
+        nav.append(InlineKeyboardButton("⬅️ ရှေ့မျက်နှာ", callback_data="page:prev"))
+    nav.append(InlineKeyboardButton(f"📄 {state['page'] + 1}/{pages}", callback_data="page:none"))
+    if state["page"] < pages - 1:
+        nav.append(InlineKeyboardButton("နောက်မျက်နှာ ➡️", callback_data="page:next"))
+    if nav:
+        buttons.append(nav)
+    return InlineKeyboardMarkup(buttons)
+
+
+async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    results = store.search(query, limit=RESULT_CAP)
     if not results:
         await target.reply_text(
             "😕 ဒီစာအုပ် (သို့) စာရေးသူ မတွေ့ပါဘူး။\n"
@@ -142,15 +179,15 @@ async def send_search_results(target, query: str, bot_username: str | None = Non
     if len(results) == 1:
         await send_book_card(target, results[0])
         return
-    buttons = [
-        [InlineKeyboardButton(f"📖 {b['title']} — {b['author']}", callback_data=f"book:{b['id']}")]
-        for b in results
-    ]
-    await target.reply_text(
-        f"🔍 `{query}` အတွက် စာအုပ် {len(results)} ခု တွေ့ပါတယ်။\n"
-        "အပြည့်အစုံ ကြည့်ချင်တဲ့ စာအုပ်ကို ရွေးပါ 👇",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    state = {
+        "query": query,
+        "results": [b["id"] for b in results],
+        "page": 0,
+        "list_message_id": None,
+    }
+    context.user_data["search_state"] = state
+    msg = await target.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
+    state["list_message_id"] = msg.message_id
 
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -168,20 +205,51 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 f"ဥပမာ: @{context.bot.username} မြစ်ရိုင်း"
             )
         return
-    await send_search_results(update.effective_message, query)
+    await send_search_results(update.effective_message, query, context)
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cb = update.callback_query
     await cb.answer()
-    if not cb.data or not cb.data.startswith("book:"):
+    data = cb.data or ""
+    state = context.user_data.get("search_state")
+    if data == "page:none":
         return
-    book_id = int(cb.data.split(":", 1)[1])
-    book = next((b for b in store.books if b["id"] == book_id), None)
-    if not book:
-        await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။ ထပ်ရှာကြည့်ပါ။")
+    if data in ("page:next", "page:prev"):
+        if not state:
+            await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
+            return
+        pages = _page_count(len(state["results"]))
+        page = state["page"] + (1 if data == "page:next" else -1)
+        state["page"] = max(0, min(pages - 1, page))
+        await cb.message.edit_text(_list_text(state), reply_markup=_list_keyboard(state))
         return
-    await send_book_card(cb.message, book)
+    if data == "page:back":
+        if not state:
+            await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
+            return
+        try:
+            await context.bot.edit_message_text(
+                _list_text(state),
+                chat_id=cb.message.chat_id,
+                message_id=state["list_message_id"],
+                reply_markup=_list_keyboard(state),
+            )
+        except Exception:  # noqa: BLE001
+            await cb.message.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
+        return
+    if data.startswith("book:"):
+        book_id = int(data.split(":", 1)[1])
+        book = store.by_id(book_id)
+        if not book:
+            await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။ ထပ်ရှာကြည့်ပါ။")
+            return
+        back_kb = None
+        if state:
+            back_kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📚 စာရင်းပြန်ကြည့်မယ်", callback_data="page:back")]]
+            )
+        await send_book_card(cb.message, book, reply_markup=back_kb)
 
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -190,7 +258,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not query:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
-    results = store.search(query, limit=RESULTS_LIMIT)
+    results = store.search(query, limit=RESULT_CAP)
     items = []
     for b in results:
         url = cover_url(b)

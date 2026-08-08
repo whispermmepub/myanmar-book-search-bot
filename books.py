@@ -126,7 +126,12 @@ class BookStore:
     def _tokenize(self, q: str) -> list[str]:
         return [normalize(t) for t in q.split() if normalize(t)]
 
-    def search(self, query: str, limit: int = 10) -> list[dict]:
+    def by_id(self, book_id: int) -> dict | None:
+        if 0 <= book_id < len(self.books) and self.books[book_id]["id"] == book_id:
+            return self.books[book_id]
+        return None
+
+    def search(self, query: str, limit: int = 100) -> list[dict]:
         q = normalize(query)
         if not q:
             return []
