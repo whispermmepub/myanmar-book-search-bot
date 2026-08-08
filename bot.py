@@ -568,6 +568,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if data == "page:back":
         if not state:
+            # The tap may come from a summary message tied to a card of a list.
+            for key, value in SUMMARY_VIEWS.items():
+                if value == cb.message.message_id:
+                    card_id = int(key.split(":")[1])
+                    state = next(
+                        (s for s in SEARCH_STATES.values() if s.get("card_message_id") == card_id),
+                        None,
+                    )
+                    break
+        if not state:
             sent = await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
             schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
             return
@@ -579,6 +589,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:  # noqa: BLE001
             pass
         state["card_message_id"] = None
+        state["current_book_id"] = None
         try:
             await context.bot.edit_message_text(
                 _list_text(state),
@@ -652,7 +663,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"✍️ စာရေးသူ: {book['author']}\n\n"
                 f"📝 အညွှန်း (အပြည့်အစုံ):\n\n{desc}"
             )
-            sent = await cb.message.reply_text(text)
+            markup = None
+            if any(s.get("card_message_id") == cb.message.message_id for s in SEARCH_STATES.values()):
+                markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("📚 စာရင်းပြန်ကြည့်မယ်", callback_data="page:back")]]
+                )
+            sent = await cb.message.reply_text(text, reply_markup=markup)
             SUMMARY_VIEWS[key] = sent.message_id
             schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
             if len(SUMMARY_VIEWS) > 1000:
