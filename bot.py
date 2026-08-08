@@ -48,6 +48,10 @@ RESULT_CAP = 100
 
 IGNORED = object()  # message that should not trigger any bot reply
 
+# Search state per list message, so that ANY member who taps a button
+# gets the same list/back-button behaviour (not tied to one user).
+SEARCH_STATES: dict[int, dict] = {}
+
 
 def build_caption(book: dict) -> str:
     lines = [
@@ -153,6 +157,10 @@ def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | 
 
 async def delete_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id, message_id = context.job.data
+    SEARCH_STATES.pop(message_id, None)
+    for s in list(SEARCH_STATES.values()):
+        if s.get("card_message_id") == message_id:
+            s["card_message_id"] = None
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         log.info("Auto-deleted message %s in chat %s", message_id, chat_id)
@@ -237,9 +245,9 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
         "page": 0,
         "list_message_id": None,
     }
-    context.user_data["search_state"] = state
     msg = await target.reply_text(_list_text(state), reply_markup=_list_keyboard(state))
     state["list_message_id"] = msg.message_id
+    SEARCH_STATES[msg.message_id] = state
     schedule_auto_delete(context, target.chat, msg.message_id)
 
 
@@ -267,7 +275,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     cb = update.callback_query
     await cb.answer()
     data = cb.data or ""
-    state = context.user_data.get("search_state")
+    state = SEARCH_STATES.get(cb.message.message_id if cb.message else None) or next(
+        (s for s in SEARCH_STATES.values() if s.get("card_message_id") == cb.message.message_id),
+        None,
+    )
     if data == "page:none":
         return
     if data in ("page:next", "page:prev"):
