@@ -169,7 +169,10 @@ def enqueue_uncached_covers() -> None:
     log.info("Cover prefetch queue size: %d", WARM_QUEUE.qsize())
 
 
-def build_caption(book: dict) -> str:
+CAPTION_LIMIT = 1024  # Telegram photo caption limit
+
+
+def _caption_header(book: dict) -> list[str]:
     lines = [
         f"📖 စာအုပ်အမည်: {book['title']}",
         f"✍️ စာရေးသူ: {book['author']}",
@@ -181,33 +184,61 @@ def build_caption(book: dict) -> str:
         lines.append(f"🗂️ အမျိုးအစား: {book['genre']}")
     if book.get("month"):
         lines.append(f"📅 ထုတ်ဝေသည့်လ: {book['month']}")
-    if book.get("description"):
-        desc = book["description"]
-        if len(desc) > 280:
-            desc = desc[:280] + "…"
-        lines.append(f"\n📝 အညွှန်း: {desc}")
+    return lines
+
+
+def build_caption(book: dict) -> str:
+    lines = _caption_header(book)
+    desc = (book.get("description") or "").strip()
+    if desc:
+        prefix = "\n📝 အညွှန်း: "
+        budget = CAPTION_LIMIT - len("\n".join(lines)) - len(prefix) - 5
+        if len(desc) > budget:
+            desc = desc[: max(0, budget - 1)] + "…"
+        lines.append(prefix + desc)
     return "\n".join(lines)
+
+
+def description_was_truncated(book: dict) -> bool:
+    desc = (book.get("description") or "").strip()
+    if not desc:
+        return False
+    header_len = len("\n".join(_caption_header(book)))
+    return len(desc) + len("\n📝 အညွှန်း: ") + header_len + 5 > CAPTION_LIMIT
 
 
 def cover_url(book: dict) -> str:
     return f"https://drive.google.com/uc?export=view&id={book['image_id']}"
 
 
-async def send_card_to_chat(bot, chat_id: int, book: dict, caption: str | None = None, reply_markup=None):
+async def send_card_to_chat(
+    bot,
+    chat_id: int,
+    book: dict,
+    caption: str | None = None,
+    reply_markup=None,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+):
     """Send a book card (photo + details) to an arbitrary chat id."""
     caption = caption or build_caption(book)
     image_id = book["image_id"]
     saved_file_id = file_ids.get(image_id)
     if saved_file_id:
-        return await bot.send_photo(chat_id=chat_id, photo=saved_file_id, caption=caption, reply_markup=reply_markup)
-    path = await images.get(image_id)
-    if path:
-        with open(path, "rb") as fh:
-            sent = await bot.send_photo(chat_id=chat_id, photo=fh, caption=caption, reply_markup=reply_markup)
-        if sent.photo:
-            save_file_id(image_id, sent.photo[-1].file_id)
-        return sent
-    return await bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup)
+        sent = await bot.send_photo(chat_id=chat_id, photo=saved_file_id, caption=caption, reply_markup=reply_markup)
+    else:
+        path = await images.get(image_id)
+        if path:
+            with open(path, "rb") as fh:
+                sent = await bot.send_photo(chat_id=chat_id, photo=fh, caption=caption, reply_markup=reply_markup)
+            if sent.photo:
+                save_file_id(image_id, sent.photo[-1].file_id)
+        else:
+            sent = await bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup)
+    if description_was_truncated(book):
+        extra = await bot.send_message(chat_id=chat_id, text="📝 အညွှန်း (အပြည့်အစုံ):\n\n" + book["description"].strip())
+        if context and chat_id < 0:
+            schedule_auto_delete(context, chat_id, "supergroup", extra.message_id)
+    return sent
 
 
 def new_book_caption(book: dict) -> str:
@@ -364,6 +395,10 @@ async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE 
             sent = await target.reply_text(caption, reply_markup=reply_markup)
     if context:
         schedule_auto_delete(context, target.chat.id, target.chat.type, sent.message_id)
+    if description_was_truncated(book):
+        extra = await target.reply_text("📝 အညွှန်း (အပြည့်အစုံ):\n\n" + book["description"].strip())
+        if context:
+            schedule_auto_delete(context, target.chat.id, target.chat.type, extra.message_id)
     return sent
 
 
