@@ -57,6 +57,12 @@ SEARCH_STATES: dict[int, dict] = {}
 # One lock per list message, so rapid taps can never show two cards at once.
 SEARCH_LOCKS: dict[int, asyncio.Lock] = {}
 
+# Full-description ("အညွှန်းဖတ်ရန်") views: card_message_id:book_id -> summary message id.
+# Keyed by card message so each card has its own view, and taps on the same
+# button replace the old summary instead of stacking duplicates.
+SUMMARY_VIEWS: dict[str, int] = {}
+SUMMARY_LOCKS: dict[str, asyncio.Lock] = {}
+
 # Telegram photo file_ids per cover, so repeat views need no download at all.
 FILE_ID_STORE = "/tmp/book_file_ids.json"
 file_ids: dict[str, str] = {}
@@ -207,6 +213,16 @@ def description_was_truncated(book: dict) -> bool:
     return len(desc) + len("\n📝 အညွှန်း: ") + header_len + 5 > CAPTION_LIMIT
 
 
+def _card_keyboard(book: dict, back: bool = False) -> InlineKeyboardMarkup | None:
+    """Buttons on a book card: full description when truncated, optional back."""
+    rows = []
+    if description_was_truncated(book):
+        rows.append([InlineKeyboardButton("📖 အညွှန်းဖတ်ရန်", callback_data=f"summary:{book['id']}")])
+    if back:
+        rows.append([InlineKeyboardButton("📚 စာရင်းပြန်ကြည့်မယ်", callback_data="page:back")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
 def cover_url(book: dict) -> str:
     return f"https://drive.google.com/uc?export=view&id={book['image_id']}"
 
@@ -221,23 +237,20 @@ async def send_card_to_chat(
 ):
     """Send a book card (photo + details) to an arbitrary chat id."""
     caption = caption or build_caption(book)
+    markup = reply_markup if reply_markup is not None else _card_keyboard(book)
     image_id = book["image_id"]
     saved_file_id = file_ids.get(image_id)
     if saved_file_id:
-        sent = await bot.send_photo(chat_id=chat_id, photo=saved_file_id, caption=caption, reply_markup=reply_markup)
+        sent = await bot.send_photo(chat_id=chat_id, photo=saved_file_id, caption=caption, reply_markup=markup)
     else:
         path = await images.get(image_id)
         if path:
             with open(path, "rb") as fh:
-                sent = await bot.send_photo(chat_id=chat_id, photo=fh, caption=caption, reply_markup=reply_markup)
+                sent = await bot.send_photo(chat_id=chat_id, photo=fh, caption=caption, reply_markup=markup)
             if sent.photo:
                 save_file_id(image_id, sent.photo[-1].file_id)
         else:
-            sent = await bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup)
-    if description_was_truncated(book):
-        extra = await bot.send_message(chat_id=chat_id, text="📝 အညွှန်း (အပြည့်အစုံ):\n\n" + book["description"].strip())
-        if context and chat_id < 0:
-            schedule_auto_delete(context, chat_id, "supergroup", extra.message_id)
+            sent = await bot.send_message(chat_id=chat_id, text=caption, reply_markup=markup)
     return sent
 
 
@@ -361,6 +374,10 @@ async def delete_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for s in list(SEARCH_STATES.values()):
         if s.get("card_message_id") == message_id:
             s["card_message_id"] = None
+    prefix = f"{chat_id}:{message_id}:"
+    for key in [k for k in SUMMARY_VIEWS if k.startswith(prefix) or SUMMARY_VIEWS.get(k) == message_id]:
+        SUMMARY_VIEWS.pop(key, None)
+        SUMMARY_LOCKS.pop(key, None)
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         log.info("Auto-deleted message %s in chat %s", message_id, chat_id)
@@ -378,27 +395,24 @@ def schedule_auto_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, chat_
     context.job_queue.run_once(delete_job, delay, data=(chat_id, message_id), name=name)
 
 
-async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE | None = None, reply_markup=None):
+async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE | None = None, include_back: bool = False):
     caption = build_caption(book)
+    markup = _card_keyboard(book, back=include_back)
     image_id = book["image_id"]
     saved_file_id = file_ids.get(image_id)
     if saved_file_id:
-        sent = await target.reply_photo(photo=saved_file_id, caption=caption, reply_markup=reply_markup)
+        sent = await target.reply_photo(photo=saved_file_id, caption=caption, reply_markup=markup)
     else:
         path = await images.get(image_id)
         if path:
             with open(path, "rb") as fh:
-                sent = await target.reply_photo(photo=fh, caption=caption, reply_markup=reply_markup)
+                sent = await target.reply_photo(photo=fh, caption=caption, reply_markup=markup)
             if sent.photo:
                 save_file_id(image_id, sent.photo[-1].file_id)
         else:
-            sent = await target.reply_text(caption, reply_markup=reply_markup)
+            sent = await target.reply_text(caption, reply_markup=markup)
     if context:
         schedule_auto_delete(context, target.chat.id, target.chat.type, sent.message_id)
-    if description_was_truncated(book):
-        extra = await target.reply_text("📝 အညွှန်း (အပြည့်အစုံ):\n\n" + book["description"].strip())
-        if context:
-            schedule_auto_delete(context, target.chat.id, target.chat.type, extra.message_id)
     return sent
 
 
@@ -488,6 +502,19 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await send_search_results(update.effective_message, query, context)
 
 
+async def _delete_card_summaries(context: ContextTypes.DEFAULT_TYPE, chat_id: int, card_message_id: int) -> None:
+    """Delete any full-description messages tied to a card that is being removed."""
+    prefix = f"{chat_id}:{card_message_id}:"
+    for key in [k for k in SUMMARY_VIEWS if k.startswith(prefix)]:
+        mid = SUMMARY_VIEWS.pop(key, None)
+        SUMMARY_LOCKS.pop(key, None)
+        if mid:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cb = update.callback_query
     await cb.answer()
@@ -516,6 +543,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         # remove the detail card so only the list remains visible
         card_id = state.get("card_message_id") or cb.message.message_id
+        await _delete_card_summaries(context, cb.message.chat_id, card_id)
         try:
             await context.bot.delete_message(chat_id=cb.message.chat_id, message_id=card_id)
         except Exception:  # noqa: BLE001
@@ -558,17 +586,49 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Remove the previously shown card right away.
             old_card = state.get("card_message_id")
             if old_card:
+                await _delete_card_summaries(context, cb.message.chat_id, old_card)
                 try:
                     await context.bot.delete_message(chat_id=cb.message.chat_id, message_id=old_card)
                 except Exception:  # noqa: BLE001
                     pass
                 state["card_message_id"] = None
-            back_kb = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📚 စာရင်းပြန်ကြည့်မယ်", callback_data="page:back")]]
-            )
-            sent = await send_book_card(cb.message, book, context=context, reply_markup=back_kb)
+            sent = await send_book_card(cb.message, book, context=context, include_back=True)
             state["card_message_id"] = sent.message_id
             state["current_book_id"] = book_id
+        return
+    if data.startswith("summary:"):
+        book_id = int(data.split(":", 1)[1])
+        book = store.by_id(book_id)
+        if not book:
+            sent = await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။")
+            schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
+            return
+        desc = (book.get("description") or "").strip()
+        if not desc:
+            await cb.answer("📖 ဒီစာအုပ်မှာ အညွှန်း မရှိပါ။")
+            return
+        key = f"{cb.message.chat_id}:{cb.message.message_id}:{book_id}"
+        lock = SUMMARY_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            # A repeated tap replaces the old summary instead of stacking duplicates.
+            old = SUMMARY_VIEWS.pop(key, None)
+            if old:
+                try:
+                    await context.bot.delete_message(chat_id=cb.message.chat_id, message_id=old)
+                except Exception:  # noqa: BLE001
+                    pass
+            text = (
+                f"📖 စာအုပ်အမည်: {book['title']}\n"
+                f"✍️ စာရေးသူ: {book['author']}\n\n"
+                f"📝 အညွှန်း (အပြည့်အစုံ):\n\n{desc}"
+            )
+            sent = await cb.message.reply_text(text)
+            SUMMARY_VIEWS[key] = sent.message_id
+            schedule_auto_delete(context, cb.message.chat.id, cb.message.chat.type, sent.message_id)
+            if len(SUMMARY_VIEWS) > 1000:
+                for old_key in list(SUMMARY_VIEWS)[: len(SUMMARY_VIEWS) - 1000]:
+                    SUMMARY_VIEWS.pop(old_key, None)
+                    SUMMARY_LOCKS.pop(old_key, None)
         return
 
 
