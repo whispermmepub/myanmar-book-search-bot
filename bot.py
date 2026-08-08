@@ -46,6 +46,8 @@ images = ImageCache()
 PAGE_SIZE = 10
 RESULT_CAP = 100
 
+IGNORED = object()  # message that should not trigger any bot reply
+
 
 def build_caption(book: dict) -> str:
     lines = [
@@ -104,18 +106,23 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
-    """Return the search query, or None if this message should be ignored."""
+def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None | object:
+    """Return the search query.
+
+    - IGNORED: message the bot should not react to at all (no mention in groups)
+    - None:    the bot was addressed, but no query text was given
+    - str:     the query to search for
+    """
     msg = update.effective_message
     text = (msg.text or "").strip()
     if not text:
-        return None
+        return IGNORED
     if msg.chat.type not in ("group", "supergroup"):
         return text
     # In groups only respond when the bot is mentioned.
     bot_mention = re.compile(r"@?" + re.escape(context.bot.username), re.IGNORECASE)
     if not bot_mention.search(text):
-        return None
+        return IGNORED
     query = re.sub(r"@[\w]+", " ", text, flags=re.IGNORECASE)
     query = re.sub(r"\b" + re.escape(context.bot.username) + r"\b", " ", query, flags=re.IGNORECASE)
     query = re.sub(r"\s+", " ", query).strip()
@@ -192,6 +199,8 @@ async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = _extract_query(update, context)
+    if query is IGNORED:
+        return
     log.info(
         "Query from %s (chat %s): %r",
         update.effective_user.username if update.effective_user else "?",
@@ -199,11 +208,10 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         query,
     )
     if query is None:
-        if update.effective_message.chat.type in ("group", "supergroup"):
-            await update.effective_message.reply_text(
-                f"🤖 စာအုပ်နာမည် (သို့) စာရေးသူနာမည် ရိုက်ပြီး ရှာပါ။\n"
-                f"ဥပမာ: @{context.bot.username} မြစ်ရိုင်း"
-            )
+        await update.effective_message.reply_text(
+            f"🤖 စာအုပ်နာမည် (သို့) စာရေးသူနာမည် ရိုက်ပြီး ရှာပါ။\n"
+            f"ဥပမာ: @{context.bot.username} မြစ်ရိုင်း"
+        )
         return
     await send_search_results(update.effective_message, query, context)
 
@@ -228,6 +236,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not state:
             await cb.message.reply_text("🔍 ရှာဖွေမှု ပြန်လုပ်ပါ။")
             return
+        # remove the detail card so only the list remains visible
+        card_id = state.get("card_message_id") or cb.message.message_id
+        try:
+            await context.bot.delete_message(chat_id=cb.message.chat_id, message_id=card_id)
+        except Exception:  # noqa: BLE001
+            pass
+        state["card_message_id"] = None
         try:
             await context.bot.edit_message_text(
                 _list_text(state),
@@ -244,12 +259,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not book:
             await cb.message.reply_text("စာအုပ် အချက်အလက် မရှိတော့ပါ။ ထပ်ရှာကြည့်ပါ။")
             return
+        if state:
+            old_card = state.get("card_message_id")
+            if old_card:
+                try:
+                    await context.bot.delete_message(chat_id=cb.message.chat_id, message_id=old_card)
+                except Exception:  # noqa: BLE001
+                    pass
         back_kb = None
         if state:
             back_kb = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("📚 စာရင်းပြန်ကြည့်မယ်", callback_data="page:back")]]
             )
-        await send_book_card(cb.message, book, reply_markup=back_kb)
+        sent = await send_book_card(cb.message, book, reply_markup=back_kb)
+        if state:
+            state["card_message_id"] = sent.message_id
 
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
