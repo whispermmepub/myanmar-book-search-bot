@@ -243,9 +243,6 @@ def enqueue_uncached_covers() -> None:
     log.info("Cover prefetch queue size: %d", WARM_QUEUE.qsize())
 
 
-CAPTION_LIMIT = 1024  # Telegram photo caption limit
-
-
 def _caption_header(book: dict) -> list[str]:
     lines = [
         f"📖 စာအုပ်အမည်: {book['title']}",
@@ -262,29 +259,19 @@ def _caption_header(book: dict) -> list[str]:
 
 
 def build_caption(book: dict) -> str:
-    lines = _caption_header(book)
-    desc = (book.get("description") or "").strip()
-    if desc:
-        prefix = "\n📝 အညွှန်း: "
-        budget = CAPTION_LIMIT - len("\n".join(lines)) - len(prefix) - 5
-        if len(desc) > budget:
-            desc = desc[: max(0, budget - 1)] + "…"
-        lines.append(prefix + desc)
-    return "\n".join(lines)
+    """Caption shows only the essential book details; the description is shown
+    on demand via the အညွှန်းဖတ်ရန် button so details stay prioritized."""
+    return "\n".join(_caption_header(book))
 
 
-def description_was_truncated(book: dict) -> bool:
-    desc = (book.get("description") or "").strip()
-    if not desc:
-        return False
-    header_len = len("\n".join(_caption_header(book)))
-    return len(desc) + len("\n📝 အညွှန်း: ") + header_len + 5 > CAPTION_LIMIT
+def has_description(book: dict) -> bool:
+    return bool((book.get("description") or "").strip())
 
 
 def _card_keyboard(book: dict, back: bool = False) -> InlineKeyboardMarkup | None:
-    """Buttons on a book card: full description when truncated, optional back."""
+    """Buttons on a book card: full description (when available), order, back."""
     rows = []
-    if description_was_truncated(book):
+    if has_description(book):
         rows.append([InlineKeyboardButton("📖 အညွှန်းဖတ်ရန်", callback_data=f"summary:{book['id']}")])
     if publisher_contact(book):
         rows.append([InlineKeyboardButton("🛒 စာအုပ်မှာရန်", callback_data=f"order:{book['id']}")])
@@ -353,7 +340,7 @@ async def send_order_to_publisher(bot, book: dict, update: Update) -> tuple[bool
     caption = build_caption(book) + _orderer_block(update)
     try:
         await send_card_to_chat(bot, uid, book, caption=caption, buttons=False)
-        if description_was_truncated(book):
+        if has_description(book):
             desc = (book.get("description") or "").strip()
             await bot.send_message(
                 chat_id=uid,
