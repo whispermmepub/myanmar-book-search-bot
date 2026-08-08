@@ -100,10 +100,32 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     loaded = store.loaded_at.strftime("%Y-%m-%d %H:%M:%S") if store.loaded_at else "—"
-    await update.effective_message.reply_text(
+    sent = await update.effective_message.reply_text(
         f"📚 စုစုပေါင်း စာအုပ်: {len(store.books)} ခု\n"
-        f"🔄 နောက်ဆုံး data ပြန်ဆွဲချိန်: {loaded} (UTC)"
+        f"🔄 နောက်ဆုံး data ပြန်ဆွဲချိန်: {loaded} (UTC)\n"
+        f"⏰ အလိုအလျောက် refresh: {REFRESH_HOURS:g} နာရီတစ်ခါ"
     )
+    schedule_auto_delete(context, update.effective_message.chat, sent.message_id)
+
+
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if OWNER_ID and (not user or str(user.id) != str(OWNER_ID)):
+        sent = await update.effective_message.reply_text("🔒 ဒီ command ကို bot ပိုင်ရှင်သာ သုံးနိုင်ပါတယ်။")
+        schedule_auto_delete(context, update.effective_message.chat, sent.message_id)
+        return
+    sent = await update.effective_message.reply_text("🔄 စာအုပ်စာရင်း ပြန်ဆွဲနေပါတယ်…")
+    schedule_auto_delete(context, update.effective_message.chat, sent.message_id)
+    try:
+        await store.load()
+        loaded = store.loaded_at.strftime("%Y-%m-%d %H:%M:%S") if store.loaded_at else "—"
+        result = f"✅ ပြီးပါပြီ — စာအုပ် {len(store.books)} ခု ရှိပါတယ်။ ({loaded} UTC)"
+    except Exception as exc:  # noqa: BLE001
+        result = f"❌ မအောင်မြင်ပါ: {exc}"
+    try:
+        await sent.edit_text(result)
+    except Exception:  # noqa: BLE001
+        await update.effective_message.reply_text(result)
 
 
 def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None | object:
@@ -358,6 +380,7 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("refresh", refresh_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
