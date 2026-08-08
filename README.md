@@ -9,7 +9,7 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 ## Commands
 - `/start` — စတင်အသုံးပြုနည်း
 - `/stats` — စာအုပ်အရေအတွက်နှင့် နောက်ဆုံး refresh အချိန်
-- အခြား message မှန်သမျှ — စာအုပ်/စာရေးသူ ရှာဖွေမှု
+- အခြား message မှန်သမျှ — စာအုပ်/စာရေးသူ ရှာဖွေမှု (တစ်မျက်နှာလျှင် ၁၀ အုပ်၊ `နောက်မျက်နှာ ➡️` ဖြင့် ဆက်ကြည့်နိုင်၊ နာမည်နှိပ်လျှင် ကာဗာပုံ + အသေးစိတ် ပြသည်)
 
 ## Group / Inline သုံးနည်း
 - **Group:** bot ကို group ထဲထည့်ပြီး Admin တင်ပါ။ ပြီးရင် `@saroatsarpay_bot စာအုပ်နာမည်` (သို့) `@saroatsarpay_bot စာရေးသူနာမည်` ရိုက်ပါ — လူတိုင်း သုံးနိုင်ပါသည်။
