@@ -1,15 +1,29 @@
-"""Telegram bot that searches Myanmar books by title or author."""
+"""Telegram bot that searches Myanmar books by title or author.
+
+Works in:
+- private chats: any text message is a search
+- groups:      messages that mention @<bot_username> are searches
+- inline mode: @<bot_username> <query> anywhere shows inline results
+"""
 
 import logging
 import os
+import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultPhoto,
+    InputTextMessageContent,
+    Update,
+)
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     filters,
 )
@@ -52,6 +66,10 @@ def build_caption(book: dict) -> str:
     return "\n".join(lines)
 
 
+def cover_url(book: dict) -> str:
+    return f"https://drive.google.com/uc?export=view&id={book['image_id']}"
+
+
 async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await store.load()
@@ -61,11 +79,15 @@ async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    bot = context.bot.username
     await update.effective_message.reply_text(
         "👋 မင်္ဂလာပါ!\n\n"
         "စာအုပ်အမည် (သို့) စာရေးသူအမည် ရိုက်ထည့်ပြီး ရှာနိုင်ပါတယ်။\n"
         "Space ပါပါ၊ မပါပါ ရှာလို့ရပါတယ်။\n\n"
-        "ဥပမာ - `မြစ်ရိုင်း`၊ `nyan lin`၊ `တင်မောင်မြင့်`"
+        "🔸 Private chat: နာမည်ရိုက်ရုံပါပဲ\n"
+        f"🔸 Group: `@{bot} နာမည်` ဆိုပြီး mention လုပ်ပါ\n"
+        f"🔸 Inline: ဘယ် chat မှာမဆို `@{bot} နာမည်` ရိုက်ပါ\n\n"
+        "ဥပမာ - `မြစ်ရိုင်း`၊ `bro code`၊ `တင်မောင်မြင့်`"
     )
 
 
@@ -81,6 +103,24 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Return the search query, or None if this message should be ignored."""
+    msg = update.effective_message
+    text = (msg.text or "").strip()
+    if not text:
+        return None
+    if msg.chat.type not in ("group", "supergroup"):
+        return text
+    # In groups only respond when the bot is mentioned.
+    bot_mention = re.compile(r"@?" + re.escape(context.bot.username), re.IGNORECASE)
+    if not bot_mention.search(text):
+        return None
+    query = re.sub(r"@[\w]+", " ", text, flags=re.IGNORECASE)
+    query = re.sub(r"\b" + re.escape(context.bot.username) + r"\b", " ", query, flags=re.IGNORECASE)
+    query = re.sub(r"\s+", " ", query).strip()
+    return query or None
+
+
 async def send_book_card(target, book: dict) -> None:
     caption = build_caption(book)
     path = await images.get(book["image_id"])
@@ -91,30 +131,38 @@ async def send_book_card(target, book: dict) -> None:
         await target.reply_text(caption)
 
 
-async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = (update.effective_message.text or "").strip()
-    if not query:
-        return
+async def send_search_results(target, query: str, bot_username: str | None = None) -> None:
     results = store.search(query, limit=RESULTS_LIMIT)
     if not results:
-        await update.effective_message.reply_text(
+        await target.reply_text(
             "😕 ဒီစာအုပ် (သို့) စာရေးသူ မတွေ့ပါဘူး။\n"
-            "နာမည် အနည်းငယ်ပဲ ရိုက်ကြည့်ပါ၊ ဥပမာ - `nyan lin`"
+            "နာမည် အနည်းငယ်ပဲ ရိုက်ကြည့်ပါ။"
         )
         return
     if len(results) == 1:
-        await send_book_card(update.effective_message, results[0])
+        await send_book_card(target, results[0])
         return
     buttons = [
         [InlineKeyboardButton(f"📖 {b['title']} — {b['author']}", callback_data=f"book:{b['id']}")]
         for b in results
     ]
-    reply = await update.effective_message.reply_text(
+    await target.reply_text(
         f"🔍 `{query}` အတွက် စာအုပ် {len(results)} ခု တွေ့ပါတယ်။\n"
         "အပြည့်အစုံ ကြည့်ချင်တဲ့ စာအုပ်ကို ရွေးပါ 👇",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
-    context.chat_data.setdefault("last_pick_message", []).append(reply.message_id)
+
+
+async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = _extract_query(update, context)
+    if query is None:
+        if update.effective_message.chat.type in ("group", "supergroup"):
+            await update.effective_message.reply_text(
+                f"🤖 စာအုပ်နာမည် (သို့) စာရေးသူနာမည် ရိုက်ပြီး ရှာပါ။\n"
+                f"ဥပမာ: @{context.bot.username} မြစ်ရိုင်း"
+            )
+        return
+    await send_search_results(update.effective_message, query)
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -130,13 +178,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await send_book_card(cb.message, book)
 
 
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = (update.inline_query.query or "").strip()
+    if not query:
+        await update.inline_query.answer([], cache_time=5, is_personal=True)
+        return
+    results = store.search(query, limit=RESULTS_LIMIT)
+    items = []
+    for b in results:
+        url = cover_url(b)
+        caption = build_caption(b)
+        items.append(
+            InlineQueryResultPhoto(
+                id=str(b["id"]),
+                photo_url=url,
+                thumbnail_url=url,
+                title=b["title"],
+                description=f"{b['author']} • {b['publisher']} • {b['price']}",
+                caption=caption,
+                input_message_content=InputTextMessageContent(caption),
+            )
+        )
+    await update.inline_query.answer(items, cache_time=300, is_personal=True)
+
+
 async def post_init(application: Application) -> None:
     me = await application.bot.get_me()
     log.info("Bot started: @%s (%s)", me.username, me.first_name)
     if OWNER_ID:
         try:
             await application.bot.send_message(
-                OWNER_ID, "✅ စာအုပ်ရှာဖွေရေး ဘော့စတင်ပါပြီ။ /start နဲ့ စတင်သုံးနိုင်ပါတယ်။"
+                OWNER_ID,
+                "✅ စာအုပ်ရှာဖွေရေး ဘော့စတင်ပါပြီ။ /start နဲ့ စတင်သုံးနိုင်ပါတယ်။\n"
+                "Group မှာ သုံးရန် bot ကို admin တင်ပြီး `@botusername နာမည်` ရိုက်ပါ။",
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("Could not notify owner: %s", exc)
@@ -154,8 +228,10 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
     return app
+
 
 def main() -> None:
     if not BOT_TOKEN:

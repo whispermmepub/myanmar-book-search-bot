@@ -11,6 +11,12 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 - `/stats` — စာအုပ်အရေအတွက်နှင့် နောက်ဆုံး refresh အချိန်
 - အခြား message မှန်သမျှ — စာအုပ်/စာရေးသူ ရှာဖွေမှု
 
+## Group / Inline သုံးနည်း
+- **Group:** bot ကို group ထဲထည့်ပြီး Admin တင်ပါ။ ပြီးရင် `@saroatsarpay_bot စာအုပ်နာမည်` (သို့) `@saroatsarpay_bot စာရေးသူနာမည်` ရိုက်ပါ — လူတိုင်း သုံးနိုင်ပါသည်။
+- **Inline mode:** BotFather မှာ inline mode ဖွင့်ထားပါက ဘယ် chat မှာမဆို `@saroatsarpay_bot နာမည်` ရိုက်လိုက်ရုံဖြင့် ရလဒ်များ ပေါ်လာပါမည်။
+  - BotFather setup: `/setinline` → `@saroatsarpay_bot` → placeholder: `စာအုပ်နာမည် (သို့) စာရေးသူနာမည် ရိုက်ပါ`
+  - Group တွင် ပိုအဆင်ပြေစေရန် BotFather → `/setprivacy` → `Disable` လုပ်နိုင်သည် (bot ကို admin တင်ထားပါက မလိုအပ်ပါ)။
+
 ## Environment variables
 | Variable | Required | Default | Description |
 |---|---|---|---|
