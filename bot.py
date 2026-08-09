@@ -12,6 +12,7 @@ import logging
 import os
 import random
 import re
+from datetime import datetime, timedelta, timezone
 
 from telegram import (
     InlineKeyboardButton,
@@ -172,6 +173,7 @@ def _looks_like_link(value: str) -> bool:
 KNOWN_BOOKS_FILE = os.path.join(STATE_DIR, "known_books.json")
 SUBSCRIBERS_FILE = os.path.join(STATE_DIR, "subscribers.json")
 BOT_GROUPS_FILE = os.path.join(STATE_DIR, "bot_groups.json")
+USAGE_FILE = os.path.join(STATE_DIR, "usage.json")
 known_keys: set[tuple] = set()
 subscribers: set[int] = set()
 bot_groups: set[int] = set()
@@ -180,6 +182,15 @@ NOTIFY_MAX_PER_REFRESH = int(os.environ.get("NOTIFY_MAX_PER_REFRESH", "25"))
 
 # chat_id -> last book id whose card was shown there (used by /addpublisher).
 LAST_VIEWED: dict[int, int] = {}
+
+# Lightweight usage analytics, persisted to disk: who started the bot, who is
+# active per day, and how many searches were made.
+usage: dict = {
+    "start_users": [],
+    "search_count": 0,
+    "search_users": [],
+    "active_days": {},
+}
 
 
 def load_json_set(path: str) -> set:
@@ -230,11 +241,79 @@ def save_bot_groups(items: set) -> None:
         pass
 
 
+def load_usage() -> dict:
+    try:
+        with open(USAGE_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "start_users": [],
+        "search_count": 0,
+        "search_users": [],
+        "active_days": {},
+    }
+
+
+def save_usage() -> None:
+    try:
+        with open(USAGE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(usage, fh)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _usage_day() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def mark_active(user_id: int) -> None:
+    day = _usage_day()
+    day_users = usage.setdefault("active_days", {}).setdefault(day, [])
+    if user_id not in day_users:
+        day_users.append(user_id)
+        # Keep only the last 90 days so the file does not grow forever.
+        days = sorted(usage["active_days"])
+        for old in days[:-90]:
+            usage["active_days"].pop(old, None)
+        save_usage()
+
+
+def record_start(user_id: int) -> None:
+    if user_id not in usage["start_users"]:
+        usage["start_users"].append(user_id)
+        save_usage()
+    mark_active(user_id)
+
+
+def record_search(user_id: int) -> None:
+    usage["search_count"] += 1
+    if user_id not in usage["search_users"]:
+        usage["search_users"].append(user_id)
+    mark_active(user_id)
+
+
+def _search_user_id(target) -> int | None:
+    """Best-effort user id for a search: sender in groups, chat id in DMs."""
+    if getattr(target, "from_user", None):
+        return target.from_user.id
+    if getattr(target, "chat", None) and target.chat.type == "private":
+        return target.chat.id
+    return None
+
+
 def load_persisted_state() -> None:
-    global known_keys, subscribers, bot_groups
+    global known_keys, subscribers, bot_groups, usage
     known_keys = load_json_set(KNOWN_BOOKS_FILE)
     subscribers = load_subscriber_ids()
     bot_groups = load_bot_groups()
+    usage = load_usage()
+    # Seed the "ever started" list from known subscribers on first run.
+    if not usage["start_users"] and subscribers:
+        usage["start_users"] = sorted(subscribers)
+        save_usage()
     if NOTIFY_GROUP_ID:
         try:
             bot_groups.add(int(NOTIFY_GROUP_ID))
@@ -406,6 +485,7 @@ async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat and update.effective_chat.type == "private":
         add_subscriber(update.effective_chat.id)
+        record_start(update.effective_chat.id)
     bot = context.bot.username
     await update.effective_message.reply_text(
         "👋 မင်္ဂလာပါ!\n\n"
@@ -419,6 +499,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🏢 `/publishers` — စာအုပ်တိုက်အားလုံး ကြည့်ရန်\n"
         "🔄 `/refresh` — စာအုပ်အသစ် ချက်ချင်းစစ်ပြီး group/DM အသိပေးရန် (owner)\n"
         "🔗 `/addpublisher <တိုက်နာမည်> <လင့်>` — စာအုပ်တိုက်ရဲ့ မှာယူရန် link ထည့်/ပြင်ရန် (owner)\n\n"
+        "📊 `/usage` — သုံးစွဲသူအရေအတွက် ကြည့်ရန် (owner)\n\n"
         "ဥပမာ - `မြစ်ရိုင်း`၊ `bro code`၊ `တင်မောင်မြင့်`"
     )
 
@@ -435,6 +516,33 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"⏰ အလိုအလျောက် refresh: {REFRESH_HOURS:g} နာရီတစ်ခါ"
     )
     schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
+
+
+async def usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: show how many people use the bot."""
+    user = update.effective_user
+    if OWNER_ID and (not user or str(user.id) != str(OWNER_ID)):
+        sent = await update.effective_message.reply_text("🔒 ဒီ command ကို bot ပိုင်ရှင်သာ သုံးနိုင်ပါတယ်။")
+        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+        return
+    today = _usage_day()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=6)).strftime("%Y-%m-%d")
+    last7: set[int] = set()
+    for day, ids in usage.get("active_days", {}).items():
+        if day >= cutoff:
+            last7.update(int(x) for x in ids)
+    today_users = set(int(x) for x in usage.get("active_days", {}).get(today, []))
+    sent = await update.effective_message.reply_text(
+        "📊 သုံးစွဲမှု အချက်အလက် (UTC)\n\n"
+        f"👥 Bot ကို /start လုပ်ထားသူ: {len(usage.get('start_users', []))} ဦး\n"
+        f"🔔 Subscriber (DM အသိပေး): {len(subscribers)} ဦး\n"
+        f"🕐 ဒီနေ့ အသုံးပြုသူ: {len(today_users)} ဦး\n"
+        f"📅 ပြီးခဲ့တဲ့ ၇ ရက် အသုံးပြုသူ: {len(last7)} ဦး\n"
+        f"🔍 ရှာဖွေမှု စုစုပေါင်း: {usage.get('search_count', 0)} ကြိမ် "
+        f"({len(usage.get('search_users', []))} ဦး ရှာဖွေပြီး)\n"
+        f"👥 Bot ပါနေတဲ့ group: {len(bot_groups)} ခု"
+    )
+    schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -641,6 +749,9 @@ def _list_keyboard(state: dict) -> InlineKeyboardMarkup:
 
 
 async def send_search_results(target, query: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = _search_user_id(target)
+    if user_id is not None:
+        record_search(user_id)
     results = store.search(query, limit=RESULT_CAP)
     if not results:
         sent = await target.reply_text(
@@ -796,6 +907,8 @@ async def _delete_card_summaries(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cb = update.callback_query
     await cb.answer()
+    if cb.from_user:
+        mark_active(cb.from_user.id)
     data = cb.data or ""
     state = SEARCH_STATES.get(cb.message.message_id if cb.message else None) or next(
         (s for s in SEARCH_STATES.values() if s.get("card_message_id") == cb.message.message_id),
@@ -962,6 +1075,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not query:
         await update.inline_query.answer([], cache_time=5, is_personal=True)
         return
+    record_search(update.inline_query.from_user.id)
     results = store.search(query, limit=RESULT_CAP)
     items = []
     for b in results:
@@ -1070,6 +1184,7 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("usage", usage_command))
     app.add_handler(CommandHandler("refresh", refresh_command))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
