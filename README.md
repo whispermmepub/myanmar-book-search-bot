@@ -11,7 +11,7 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 - `/stats` — စာအုပ်အရေအတွက်နှင့် နောက်ဆုံး refresh အချိန်
 - `/get <စာအုပ်နာမည် သို့မဟုတ် စာရေးသူ>` — group ထဲမှာ `@mention` မလိုဘဲ ရှာနိုင် (inline mode ဖွင့်ထားလို့ စာရိုက်မရတဲ့ group တွေအတွက်)
 - `/refresh` — Google Sheet ကို ချက်ချင်းပြန်ဆွဲပြီး စာအုပ်အသစ်ရှိလျှင် group/DM အားလုံးကို အသိပေးရန် (owner)
-- `/addpublisher <link>` — နောက်ဆုံးဖွင့်ကြည့်ထားတဲ့ စာအုပ်ကဒ်ရဲ့ စာအုပ်တိုက်ကို မှာယူရန် link နှင့် ချက်ချင်းချိတ်ရန် (owner)
+- `/addpublisher <စာအုပ်တိုက်နာမည်> <link>` — စာအုပ်တိုက်ရဲ့ မှာယူရန် link ထည့်/ပြင်ရန် (owner) — ဥပမာ `/addpublisher နှစ်ကာလများ https://t.me/theerasbookpublishing`
 - `/books` — စာအုပ်အားလုံး (စာမျက်နှာလိုက်) ကြည့်ရန်
 - `/publishers` — စာအုပ်တိုက်အားလုံး (စာမျက်နှာလိုက်) ကြည့်ရန် — တိုက်နှိပ်လျှင် ထိုတိုက်၏ စာအုပ်များ ပြသည်
 - အခြား message မှန်သမျှ — စာအုပ်/စာရေးသူ ရှာဖွေမှု (တစ်မျက်နှာလျှင် ၁၀ အုပ်၊ `နောက်မျက်နှာ ➡️` ဖြင့် ဆက်ကြည့်နိုင်၊ နာမည်နှိပ်လျှင် ကာဗာပုံ + အသေးစိတ် ပြသည်)
@@ -29,7 +29,7 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
   ```
 - Full link (`https://t.me/...` သို့မဟုတ် invite link `https://t.me/+...`) ဖြစ်စေ၊ username (`channelname` သို့ `@channelname`) ဖြစ်စေ ထည့်နိုင်သည် — bot က link ပြန်ဖြောင့်ပေးပါသည်။
 - Channel link မထည့်ရသေးသော စာအုပ်တိုက်များတွင် ခလုတ် မပေါ်ပါ။
-- Owner သည် bot ထဲမှာပင် `/addpublisher <link>` ဖြင့် တိုက်သစ်၏ link ကို ချက်ချင်းထည့်နိုင်သည် — စာအုပ်ကဒ်တစ်ခုဖွင့်ပြီးမှ ရိုက်ပါ၊ ထိုကဒ်ရဲ့ စာအုပ်တိုက်နဲ့ ချိတ်ပေးပါမည်။ ထည့်ပြီးသား link များကို Railway volume (`STATE_DIR/publisher_channels.json`) တွင် သိမ်းထားသောကြောင့် redeploy ပြုလုပ်ပါက မပျောက်ပါ။
+- Owner သည် bot ထဲမှာပင် `/addpublisher <တိုက်နာမည်> <link>` ဖြင့် တိုက်၏ link ကို ချက်ချင်းထည့်/ပြင်နိုင်သည် (နာမည်ရှိပြီးသားဆိုရင် link update ဖြစ်သည်) — ဥပမာ `/addpublisher စာရိပ်မြိုင် စာပေ https://www.facebook.com/share/19MApsWDbJ/`။ ထည့်ပြီးသား link များကို Railway volume (`STATE_DIR/publisher_channels.json`) တွင် သိမ်းထားသောကြောင့် redeploy ပြုလုပ်ပါက မပျောက်ပါ။
 
 ## New-book notifications
 - Bot သည် Google Sheet တွင် စာအုပ်အသစ်ပေါ်လာတိုင်း bot ပါဝင်နေသော group အားလုံး နှင့် subscriber DM များအားလုံးကို ကာဗာပုံ + အချက်အလက်များဖြင့် အလိုအလျောက် အသိပေးသည် (group များတွင် 5 မိနစ်အကြာတွင် ဖျက်သည်၊ DM တွင် မဖျက်ပါ)။

@@ -32,7 +32,7 @@ from telegram.ext import (
     filters,
 )
 
-from books import BookStore, ImageCache
+from books import BookStore, ImageCache, canonical_publisher
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -147,6 +147,11 @@ def publisher_channel(book: dict) -> str | None:
     for key, val in publisher_channels.items():
         if key.replace("\u200b", "").casefold() == folded:
             return _channel_link(val)
+    canon = canonical_publisher(name)
+    if canon != name:
+        val = publisher_channels.get(canon)
+        if val:
+            return _channel_link(val)
     return None
 
 
@@ -156,6 +161,11 @@ def _channel_link(value: str) -> str:
     if value.startswith("http://") or value.startswith("https://"):
         return value
     return "https://t.me/" + value.lstrip("@")
+
+
+def _looks_like_link(value: str) -> bool:
+    value = value.strip().lower()
+    return value.startswith(("http://", "https://", "t.me/", "@"))
 
 
 # Known books (dedupe keys) + notification subscribers, persisted to disk.
@@ -408,7 +418,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📚 `/books` — စာအုပ်အားလုံး ကြည့်ရန်\n"
         "🏢 `/publishers` — စာအုပ်တိုက်အားလုံး ကြည့်ရန်\n"
         "🔄 `/refresh` — စာအုပ်အသစ် ချက်ချင်းစစ်ပြီး group/DM အသိပေးရန် (owner)\n"
-        "🔗 `/addpublisher <link>` — နောက်ဆုံးဖွင့်ထားတဲ့ စာအုပ်တိုက်ရဲ့ မှာယူရန် link ထည့်ရန် (owner)\n\n"
+        "🔗 `/addpublisher <တိုက်နာမည်> <လင့်>` — စာအုပ်တိုက်ရဲ့ မှာယူရန် link ထည့်/ပြင်ရန် (owner)\n\n"
         "ဥပမာ - `မြစ်ရိုင်း`၊ `bro code`၊ `တင်မောင်မြင့်`"
     )
 
@@ -463,33 +473,51 @@ async def get_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def addpublisher_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Owner-only: attach an order link to the publisher of the last card shown."""
+    """Owner-only: add/update a publisher order link by publisher name."""
     user = update.effective_user
     if OWNER_ID and (not user or str(user.id) != str(OWNER_ID)):
         sent = await update.effective_message.reply_text("🔒 ဒီ command ကို bot ပိုင်ရှင်သာ သုံးနိုင်ပါတယ်။")
         schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
         return
-    link = " ".join(context.args or []).strip()
+    args = context.args or []
+    if not args:
+        sent = await update.effective_message.reply_text(
+            "ℹ️ ဥပမာ: `/addpublisher နှစ်ကာလများ https://t.me/theerasbookpublishing`\n"
+            "စာအုပ်တိုက်နာမည် + လင့် ရိုက်ထည့်ပါ။ နာမည်ရှိပြီးသားဆိုရင် လင့်ကို update လုပ်ပေးပါမယ်။"
+        )
+        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+        return
+    name_parts: list[str] = []
+    link = ""
+    for part in args:
+        if _looks_like_link(part):
+            link = part
+        else:
+            name_parts.append(part)
+    name = canonical_publisher(" ".join(name_parts).strip())
     if not link:
         sent = await update.effective_message.reply_text(
-            "ℹ️ ဥပမာ: `/addpublisher https://www.facebook.com/share/xxxx/`\n"
-            "ဒီ chat မှာ နောက်ဆုံး ဖွင့်ကြည့်ထားတဲ့ စာအုပ်ရဲ့ စာအုပ်တိုက်ကို ဒီ link နဲ့ ချိတ်ပေးပါမယ်။"
+            "😕 လင့်မပါပါဘူး။\n"
+            "ဥပမာ: `/addpublisher နှစ်ကာလများ https://t.me/theerasbookpublishing`"
         )
         schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
         return
-    book_id = LAST_VIEWED.get(update.effective_chat.id)
-    book = store.by_id(book_id) if book_id is not None else None
-    if not book:
-        sent = await update.effective_message.reply_text(
-            "😕 ဒီ chat မှာ စာအုပ်တစ်အုပ် အရင်ဖွင့်ပြပါ — ပြီးမှ `/addpublisher <link>` ရိုက်ပါ။"
-        )
-        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
-        return
-    name = book["publisher"]
+    if not name:
+        # Backwards-compat: link-only input uses the last card shown here.
+        book_id = LAST_VIEWED.get(update.effective_chat.id)
+        book = store.by_id(book_id) if book_id is not None else None
+        if not book:
+            sent = await update.effective_message.reply_text(
+                "😕 စာအုပ်တိုက်နာမည် ပါအောင် ရိုက်ပါ။\n"
+                "ဥပမာ: `/addpublisher နှစ်ကာလများ https://t.me/theerasbookpublishing`"
+            )
+            schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+            return
+        name = canonical_publisher(book["publisher"])
     publisher_channels[name] = link
     save_publisher_channels()
     sent = await update.effective_message.reply_text(
-        f"✅ `{name}` ရဲ့ မှာယူရန် link ထည့်ပြီးပါပြီ။\n"
+        f"✅ `{name}` ရဲ့ မှာယူရန် link ထည့်/ပြင်ပြီးပါပြီ။\n"
         f"🔗 {_channel_link(link)}\n"
         "ဒီတိုက်ရဲ့ စာအုပ်ကဒ်တွေမှာ 🛒 စာအုပ်မှာရန် ခလုတ် ပေါ်ပါတော့မယ်။"
     )
