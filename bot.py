@@ -68,8 +68,13 @@ SUMMARY_LOCKS: dict[str, asyncio.Lock] = {}
 PUBLISHER_CHANNELS_FILE = "publisher_channels.json"
 publisher_channels: dict[str, str] = {}
 
+# Durable state directory (Railway volume /data). Falls back to /tmp, which is
+# fine locally but is wiped on Railway deploys.
+STATE_DIR = os.environ.get("STATE_DIR", "/tmp")
+os.makedirs(STATE_DIR, exist_ok=True)
+
 # Telegram photo file_ids per cover, so repeat views need no download at all.
-FILE_ID_STORE = "/tmp/book_file_ids.json"
+FILE_ID_STORE = os.path.join(STATE_DIR, "book_file_ids.json")
 file_ids: dict[str, str] = {}
 
 # Background cover prefetch, so the first tap on any book is already cached.
@@ -130,8 +135,8 @@ def _channel_link(value: str) -> str:
 
 
 # Known books (dedupe keys) + notification subscribers, persisted to disk.
-KNOWN_BOOKS_FILE = "/tmp/known_books.json"
-SUBSCRIBERS_FILE = "/tmp/subscribers.json"
+KNOWN_BOOKS_FILE = os.path.join(STATE_DIR, "known_books.json")
+SUBSCRIBERS_FILE = os.path.join(STATE_DIR, "subscribers.json")
 known_keys: set[tuple] = set()
 subscribers: set[int] = set()
 NOTIFY_GROUP_ID = os.environ.get("NOTIFY_GROUP_ID", "")
@@ -307,20 +312,26 @@ async def announce_new_books(context: ContextTypes.DEFAULT_TYPE, books: list[dic
         log.info("Announced new book %r to %s", book["title"], ", ".join(targets) or "nobody")
 
 
+async def _detect_and_announce_new_books(context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+    """Find books not seen before, persist the seen set, and announce them."""
+    new_books = []
+    if known_keys:
+        new_books = [b for b in store.books if (b["title_n"], b["author_n"]) not in known_keys]
+    known_keys.update((b["title_n"], b["author_n"]) for b in store.books)
+    save_json_set(KNOWN_BOOKS_FILE, known_keys)
+    if new_books:
+        log.info("New books detected: %d", len(new_books))
+        await announce_new_books(context, new_books)
+    return new_books
+
+
 async def refresh_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         load_publisher_channels()
         await store.load()
         log.info("Data refreshed: %d books", len(store.books))
         enqueue_uncached_covers()
-        new_books = []
-        if known_keys:
-            new_books = [b for b in store.books if (b["title_n"], b["author_n"]) not in known_keys]
-        known_keys.update((b["title_n"], b["author_n"]) for b in store.books)
-        save_json_set(KNOWN_BOOKS_FILE, known_keys)
-        if new_books:
-            log.info("New books detected: %d", len(new_books))
-            await announce_new_books(context, new_books)
+        await _detect_and_announce_new_books(context)
     except Exception as exc:  # noqa: BLE001
         log.error("Data refresh failed: %s", exc)
 
@@ -367,7 +378,10 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         await store.load()
         loaded = store.loaded_at.strftime("%Y-%m-%d %H:%M:%S") if store.loaded_at else "—"
+        new_books = await _detect_and_announce_new_books(context)
         result = f"✅ ပြီးပါပြီ — စာအုပ် {len(store.books)} ခု ရှိပါတယ်။ ({loaded} UTC)"
+        if new_books:
+            result += f"\n🆕 အသစ် {len(new_books)} အုပ် — group/DM မှာ အသိပေးလိုက်ပါပြီ။"
     except Exception as exc:  # noqa: BLE001
         result = f"❌ မအောင်မြင်ပါ: {exc}"
     try:
