@@ -9,6 +9,7 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 ## Commands
 - `/start` — စတင်အသုံးပြုနည်း
 - `/stats` — စာအုပ်အရေအတွက်နှင့် နောက်ဆုံး refresh အချိန်
+- `/usage` — သုံးစွဲသူအရေအတွက် (start လုပ်ထားသူ၊ ဒီနေ့/၇ရက် active၊ ရှာဖွေမှုအရေအတွက်) (owner)
 - `/get <စာအုပ်နာမည် သို့မဟုတ် စာရေးသူ>` — group ထဲမှာ `@mention` မလိုဘဲ ရှာနိုင် (inline mode ဖွင့်ထားလို့ စာရိုက်မရတဲ့ group တွေအတွက်)
 - `/refresh` — Google Sheet ကို ချက်ချင်းပြန်ဆွဲပြီး စာအုပ်အသစ်ရှိလျှင် group/DM အားလုံးကို အသိပေးရန် (owner)
 - `/addpublisher <စာအုပ်တိုက်နာမည်> <link>` — စာအုပ်တိုက်ရဲ့ မှာယူရန် link ထည့်/ပြင်ရန် (owner) — ဥပမာ `/addpublisher နှစ်ကာလများ https://t.me/theerasbookpublishing`
