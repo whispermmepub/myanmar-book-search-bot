@@ -9,6 +9,9 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 ## Commands
 - `/start` — စတင်အသုံးပြုနည်း
 - `/stats` — စာအုပ်အရေအတွက်နှင့် နောက်ဆုံး refresh အချိန်
+- `/get <စာအုပ်နာမည် သို့မဟုတ် စာရေးသူ>` — group ထဲမှာ `@mention` မလိုဘဲ ရှာနိုင် (inline mode ဖွင့်ထားလို့ စာရိုက်မရတဲ့ group တွေအတွက်)
+- `/refresh` — Google Sheet ကို ချက်ချင်းပြန်ဆွဲပြီး စာအုပ်အသစ်ရှိလျှင် group/DM အားလုံးကို အသိပေးရန် (owner)
+- `/addpublisher <link>` — နောက်ဆုံးဖွင့်ကြည့်ထားတဲ့ စာအုပ်ကဒ်ရဲ့ စာအုပ်တိုက်ကို မှာယူရန် link နှင့် ချက်ချင်းချိတ်ရန် (owner)
 - `/books` — စာအုပ်အားလုံး (စာမျက်နှာလိုက်) ကြည့်ရန်
 - `/publishers` — စာအုပ်တိုက်အားလုံး (စာမျက်နှာလိုက်) ကြည့်ရန် — တိုက်နှိပ်လျှင် ထိုတိုက်၏ စာအုပ်များ ပြသည်
 - အခြား message မှန်သမျှ — စာအုပ်/စာရေးသူ ရှာဖွေမှု (တစ်မျက်နှာလျှင် ၁၀ အုပ်၊ `နောက်မျက်နှာ ➡️` ဖြင့် ဆက်ကြည့်နိုင်၊ နာမည်နှိပ်လျှင် ကာဗာပုံ + အသေးစိတ် ပြသည်)
@@ -26,10 +29,12 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
   ```
 - Full link (`https://t.me/...` သို့မဟုတ် invite link `https://t.me/+...`) ဖြစ်စေ၊ username (`channelname` သို့ `@channelname`) ဖြစ်စေ ထည့်နိုင်သည် — bot က link ပြန်ဖြောင့်ပေးပါသည်။
 - Channel link မထည့်ရသေးသော စာအုပ်တိုက်များတွင် ခလုတ် မပေါ်ပါ။
+- Owner သည် bot ထဲမှာပင် `/addpublisher <link>` ဖြင့် တိုက်သစ်၏ link ကို ချက်ချင်းထည့်နိုင်သည် — စာအုပ်ကဒ်တစ်ခုဖွင့်ပြီးမှ ရိုက်ပါ၊ ထိုကဒ်ရဲ့ စာအုပ်တိုက်နဲ့ ချိတ်ပေးပါမည်။ ထည့်ပြီးသား link များကို Railway volume (`STATE_DIR/publisher_channels.json`) တွင် သိမ်းထားသောကြောင့် redeploy ပြုလုပ်ပါက မပျောက်ပါ။
 
 ## New-book notifications
-- Bot သည် Google Sheet တွင် စာအုပ်အသစ်ပေါ်လာတိုင်း (`NOTIFY_GROUP_ID` သတ်မှတ်ထားသော) group သို့ ကာဗာပုံ + အချက်အလက်များဖြင့် အလိုအလျောက် အသိပေးသည် (5 မိနစ်အကြာတွင် ဖျက်သည်)။
+- Bot သည် Google Sheet တွင် စာအုပ်အသစ်ပေါ်လာတိုင်း bot ပါဝင်နေသော group အားလုံး နှင့် subscriber DM များအားလုံးကို ကာဗာပုံ + အချက်အလက်များဖြင့် အလိုအလျောက် အသိပေးသည် (group များတွင် 5 မိနစ်အကြာတွင် ဖျက်သည်၊ DM တွင် မဖျက်ပါ)။
 - DM အသိပေးချက်: bot ကို private chat တွင် `/start` သို့မဟုတ် စာတစ်စောင်ပို့လိုက်ပါက subscriber အဖြစ် အလိုအလျောက်ပါဝင်ပြီး စာအုပ်အသစ်တိုင်း DM ရောက်သည်။ `/unsubscribe` ဖြင့် ရပ်နိုင်သည်။
+- Refresh: `REFRESH_HOURS` (Railway တွင် `1` = ၁ နာရီခြား auto refresh)။ Owner က `/refresh` ဖြင့် ချက်ချင်းလည်း စေနိုင်သည်။
 - Env vars: `NOTIFY_GROUP_ID` (group chat id, optional), `NOTIFY_MAX_PER_REFRESH` (default 25).
 - Owner test: `/demo` command ဖြင့် ရှိပြီးသားစာအုပ်တစ်အုပ်ကို "စာအုပ်အသစ်" ပုံစံဖြင့် စမ်းပို့ကြည့်နိုင်သည်။
 
@@ -45,7 +50,14 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 | `TELEGRAM_BOT_TOKEN` | ✅ | — | Telegram bot token |
 | `TELEGRAM_OWNER_ID` | ❌ | — | Bot စတင်ချိန်တွင် အကြောင်းကြားမည့် user id |
 | `REFRESH_HOURS` | ❌ | `6` | CSV data refresh interval (hours) |
+| `STATE_DIR` | ❌ | `/tmp` | Durable state folder (Railway volume `/data`) — known books, subscribers, groups, publisher links, cover cache |
+| `NOTIFY_GROUP_ID` | ❌ | — | ရှိပြီးသား group တစ်ခုအား အမြဲအသိပေးရန် ထည့်နိုင်သည် |
 | `SHEET_CSV_URL` | ❌ | Google Sheets export URL | စာအုပ်စာရင်း CSV URL |
+
+## Durable state (Railway volume)
+- Railway ပေါ်တွင် volume `book-search-bot-volume` ကို `/data` တွင် mount ထားပြီး `STATE_DIR=/data`၊ `IMAGE_CACHE_DIR=/data/covers` ဟု သတ်မှတ်ထားသည်။
+- သိမ်းဆည်းသည့်အရာများ: မြင်ဖူးပြီးသား စာအုပ်များ (`known_books.json` — new-book detection အတွက်)၊ subscribers (`subscribers.json`)၊ group စာရင်း (`bot_groups.json`)၊ publisher links (`publisher_channels.json` — `/addpublisher` ဖြင့် ထည့်သည်)၊ cover photo `file_id` cache (`book_file_ids.json`)။
+- ဒါကြောင့် redeploy လုပ်ပါက စာအုပ်အသစ်များကို ထပ်မံ "အသစ်" ဟု မသတ်မှတ်တော့ပါ။
 
 ## Run locally
 ```bash

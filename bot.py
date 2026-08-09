@@ -28,6 +28,7 @@ from telegram.ext import (
     ContextTypes,
     InlineQueryHandler,
     MessageHandler,
+    ChatMemberHandler,
     filters,
 )
 
@@ -63,15 +64,17 @@ SEARCH_LOCKS: dict[int, asyncio.Lock] = {}
 SUMMARY_VIEWS: dict[str, int] = {}
 SUMMARY_LOCKS: dict[str, asyncio.Lock] = {}
 
-# Publisher name -> Telegram channel link, loaded from publisher_channels.json.
-# The "order this book" button opens this link so the user can order directly.
-PUBLISHER_CHANNELS_FILE = "publisher_channels.json"
-publisher_channels: dict[str, str] = {}
-
 # Durable state directory (Railway volume /data). Falls back to /tmp, which is
 # fine locally but is wiped on Railway deploys.
 STATE_DIR = os.environ.get("STATE_DIR", "/tmp")
 os.makedirs(STATE_DIR, exist_ok=True)
+
+# Publisher name -> Telegram channel link. The "order this book" button opens
+# this link. Loaded from the durable STATE_DIR copy (seeded from the repo file),
+# and updated at runtime via /addpublisher.
+REPO_PUBLISHER_CHANNELS_FILE = "publisher_channels.json"
+PUBLISHER_CHANNELS_FILE = os.path.join(STATE_DIR, "publisher_channels.json")
+publisher_channels: dict[str, str] = {}
 
 # Telegram photo file_ids per cover, so repeat views need no download at all.
 FILE_ID_STORE = os.path.join(STATE_DIR, "book_file_ids.json")
@@ -102,6 +105,15 @@ def save_file_id(image_id: str, file_id: str) -> None:
 
 def load_publisher_channels() -> None:
     global publisher_channels
+    if not os.path.exists(PUBLISHER_CHANNELS_FILE) and os.path.exists(REPO_PUBLISHER_CHANNELS_FILE):
+        try:
+            with open(REPO_PUBLISHER_CHANNELS_FILE, encoding="utf-8") as src:
+                data = json.load(src)
+            with open(PUBLISHER_CHANNELS_FILE, "w", encoding="utf-8") as dst:
+                json.dump(data, dst, ensure_ascii=False, indent=2)
+            log.info("Seeded publisher channels into %s", PUBLISHER_CHANNELS_FILE)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         with open(PUBLISHER_CHANNELS_FILE, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -109,6 +121,18 @@ def load_publisher_channels() -> None:
         log.info("Loaded %d publisher channels", len(publisher_channels))
     except Exception:  # noqa: BLE001
         publisher_channels = {}
+
+
+def save_publisher_channels() -> None:
+    try:
+        data = {
+            "_comment": "Runtime-updated via /addpublisher. Deploy adds repo defaults if missing.",
+            **publisher_channels,
+        }
+        with open(PUBLISHER_CHANNELS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not save publisher channels: %s", exc)
 
 
 def publisher_channel(book: dict) -> str | None:
@@ -137,10 +161,15 @@ def _channel_link(value: str) -> str:
 # Known books (dedupe keys) + notification subscribers, persisted to disk.
 KNOWN_BOOKS_FILE = os.path.join(STATE_DIR, "known_books.json")
 SUBSCRIBERS_FILE = os.path.join(STATE_DIR, "subscribers.json")
+BOT_GROUPS_FILE = os.path.join(STATE_DIR, "bot_groups.json")
 known_keys: set[tuple] = set()
 subscribers: set[int] = set()
+bot_groups: set[int] = set()
 NOTIFY_GROUP_ID = os.environ.get("NOTIFY_GROUP_ID", "")
 NOTIFY_MAX_PER_REFRESH = int(os.environ.get("NOTIFY_MAX_PER_REFRESH", "25"))
+
+# chat_id -> last book id whose card was shown there (used by /addpublisher).
+LAST_VIEWED: dict[int, int] = {}
 
 
 def load_json_set(path: str) -> set:
@@ -175,11 +204,39 @@ def save_subscriber_ids(items: set) -> None:
         pass
 
 
+def load_bot_groups() -> set[int]:
+    try:
+        with open(BOT_GROUPS_FILE, encoding="utf-8") as fh:
+            return {int(x) for x in json.load(fh)}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def save_bot_groups(items: set) -> None:
+    try:
+        with open(BOT_GROUPS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(sorted(items), fh)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def load_persisted_state() -> None:
-    global known_keys, subscribers
+    global known_keys, subscribers, bot_groups
     known_keys = load_json_set(KNOWN_BOOKS_FILE)
     subscribers = load_subscriber_ids()
-    log.info("Known books: %d, subscribers: %d", len(known_keys), len(subscribers))
+    bot_groups = load_bot_groups()
+    if NOTIFY_GROUP_ID:
+        try:
+            bot_groups.add(int(NOTIFY_GROUP_ID))
+        except ValueError:
+            pass
+        save_bot_groups(bot_groups)
+    log.info(
+        "Known books: %d, subscribers: %d, groups: %d",
+        len(known_keys),
+        len(subscribers),
+        len(bot_groups),
+    )
 
 
 def add_subscriber(chat_id: int) -> bool:
@@ -296,13 +353,13 @@ async def announce_new_books(context: ContextTypes.DEFAULT_TYPE, books: list[dic
     for book in books[:NOTIFY_MAX_PER_REFRESH]:
         caption = new_book_caption(book)
         targets = []
-        if NOTIFY_GROUP_ID:
+        for gid in bot_groups:
             try:
-                sent = await send_card_to_chat(context.bot, int(NOTIFY_GROUP_ID), book, caption=caption)
+                sent = await send_card_to_chat(context.bot, gid, book, caption=caption)
                 schedule_auto_delete(context, sent.chat.id, sent.chat.type, sent.message_id)
-                targets.append("group")
+                targets.append(f"group:{gid}")
             except Exception as exc:  # noqa: BLE001
-                log.warning("Group announce failed for %s: %s", book["title"], exc)
+                log.warning("Group announce to %s failed for %s: %s", gid, book["title"], exc)
         for uid in list(subscribers):
             try:
                 await send_card_to_chat(context.bot, uid, book, caption=caption)
@@ -346,9 +403,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Space ပါပါ၊ မပါပါ ရှာလို့ရပါတယ်။\n\n"
         "🔸 Private chat: နာမည်ရိုက်ရုံပါပဲ\n"
         f"🔸 Group: `@{bot} နာမည်` ဆိုပြီး mention လုပ်ပါ\n"
+        f"🔸 Group (inline ဖွင့်ထားရင်): `/get နာမည်` ဆိုပြီး ရှာပါ\n"
         f"🔸 Inline: ဘယ် chat မှာမဆို `@{bot} နာမည်` ရိုက်ပါ\n\n"
         "📚 `/books` — စာအုပ်အားလုံး ကြည့်ရန်\n"
-        "🏢 `/publishers` — စာအုပ်တိုက်အားလုံး ကြည့်ရန်\n\n"
+        "🏢 `/publishers` — စာအုပ်တိုက်အားလုံး ကြည့်ရန်\n"
+        "🔄 `/refresh` — စာအုပ်အသစ် ချက်ချင်းစစ်ပြီး group/DM အသိပေးရန် (owner)\n"
+        "🔗 `/addpublisher <link>` — နောက်ဆုံးဖွင့်ထားတဲ့ စာအုပ်တိုက်ရဲ့ မှာယူရန် link ထည့်ရန် (owner)\n\n"
         "ဥပမာ - `မြစ်ရိုင်း`၊ `bro code`၊ `တင်မောင်မြင့်`"
     )
 
@@ -388,6 +448,52 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await sent.edit_text(result)
     except Exception:  # noqa: BLE001
         await update.effective_message.reply_text(result)
+
+
+async def get_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Search from a plain command so groups do not need @mention or inline."""
+    query = " ".join(context.args or []).strip()
+    if not query:
+        sent = await update.effective_message.reply_text(
+            "🔍 ဥပမာ: `/get မြစ်ရိုင်း` (သို့) `/get တင်မောင်မြင့်`"
+        )
+        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+        return
+    await send_search_results(update.effective_message, query, context)
+
+
+async def addpublisher_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: attach an order link to the publisher of the last card shown."""
+    user = update.effective_user
+    if OWNER_ID and (not user or str(user.id) != str(OWNER_ID)):
+        sent = await update.effective_message.reply_text("🔒 ဒီ command ကို bot ပိုင်ရှင်သာ သုံးနိုင်ပါတယ်။")
+        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+        return
+    link = " ".join(context.args or []).strip()
+    if not link:
+        sent = await update.effective_message.reply_text(
+            "ℹ️ ဥပမာ: `/addpublisher https://www.facebook.com/share/xxxx/`\n"
+            "ဒီ chat မှာ နောက်ဆုံး ဖွင့်ကြည့်ထားတဲ့ စာအုပ်ရဲ့ စာအုပ်တိုက်ကို ဒီ link နဲ့ ချိတ်ပေးပါမယ်။"
+        )
+        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+        return
+    book_id = LAST_VIEWED.get(update.effective_chat.id)
+    book = store.by_id(book_id) if book_id is not None else None
+    if not book:
+        sent = await update.effective_message.reply_text(
+            "😕 ဒီ chat မှာ စာအုပ်တစ်အုပ် အရင်ဖွင့်ပြပါ — ပြီးမှ `/addpublisher <link>` ရိုက်ပါ။"
+        )
+        schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
+        return
+    name = book["publisher"]
+    publisher_channels[name] = link
+    save_publisher_channels()
+    sent = await update.effective_message.reply_text(
+        f"✅ `{name}` ရဲ့ မှာယူရန် link ထည့်ပြီးပါပြီ။\n"
+        f"🔗 {_channel_link(link)}\n"
+        "ဒီတိုက်ရဲ့ စာအုပ်ကဒ်တွေမှာ 🛒 စာအုပ်မှာရန် ခလုတ် ပေါ်ပါတော့မယ်။"
+    )
+    schedule_auto_delete(context, update.effective_chat.id, update.effective_chat.type, sent.message_id)
 
 
 def _extract_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None | object:
@@ -442,6 +548,7 @@ def schedule_auto_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, chat_
 
 
 async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE | None = None, include_back: bool = False):
+    LAST_VIEWED[target.chat.id] = book["id"]
     caption = build_caption(book)
     markup = _card_keyboard(book, back=include_back)
     image_id = book["image_id"]
@@ -626,6 +733,23 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         schedule_auto_delete(context, update.effective_message.chat.id, update.effective_message.chat.type, sent.message_id)
         return
     await send_search_results(update.effective_message, query, context)
+
+
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remember every group the bot is a member of, so new books can be
+    announced there. Group ids persist in the durable state dir."""
+    mc = update.my_chat_member
+    if not mc or mc.chat.type not in ("group", "supergroup"):
+        return
+    status = mc.new_chat_member.status
+    if status in ("member", "administrator"):
+        bot_groups.add(mc.chat.id)
+        save_bot_groups(bot_groups)
+        log.info("Added bot to group %s", mc.chat.id)
+    elif status in ("left", "kicked"):
+        bot_groups.discard(mc.chat.id)
+        save_bot_groups(bot_groups)
+        log.info("Bot removed from group %s", mc.chat.id)
 
 
 async def _delete_card_summaries(context: ContextTypes.DEFAULT_TYPE, chat_id: int, card_message_id: int) -> None:
@@ -872,13 +996,13 @@ async def demo_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     book = random.choice(store.books)
     caption = new_book_caption(book)
     done = []
-    if NOTIFY_GROUP_ID:
+    for gid in bot_groups:
         try:
-            sent = await send_card_to_chat(context.bot, int(NOTIFY_GROUP_ID), book, caption=caption)
+            sent = await send_card_to_chat(context.bot, gid, book, caption=caption)
             schedule_auto_delete(context, sent.chat.id, sent.chat.type, sent.message_id)
-            done.append("group")
+            done.append(f"group:{gid}")
         except Exception as exc:  # noqa: BLE001
-            log.warning("Demo group send failed: %s", exc)
+            log.warning("Demo group send to %s failed: %s", gid, exc)
     sent = await send_card_to_chat(context.bot, update.effective_chat.id, book, caption=caption)
     done.append("DM")
     reply = await update.effective_message.reply_text(
@@ -924,8 +1048,11 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("demo", demo_notify))
     app.add_handler(CommandHandler("books", all_books_command))
     app.add_handler(CommandHandler("publishers", publishers_command))
+    app.add_handler(CommandHandler("get", get_command))
+    app.add_handler(CommandHandler("addpublisher", addpublisher_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(InlineQueryHandler(inline_query))
+    app.add_handler(ChatMemberHandler(handle_my_chat_member, chat_member_types=ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
     return app
 
