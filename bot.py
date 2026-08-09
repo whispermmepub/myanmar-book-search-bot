@@ -326,6 +326,12 @@ def load_persisted_state() -> None:
         len(subscribers),
         len(bot_groups),
     )
+    log.info(
+        "Usage: %d starters, %d searches, %d active today",
+        len(usage.get("start_users", [])),
+        usage.get("search_count", 0),
+        len(usage.get("active_days", {}).get(_usage_day(), [])),
+    )
 
 
 def add_subscriber(chat_id: int) -> bool:
