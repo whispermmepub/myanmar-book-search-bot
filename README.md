@@ -17,7 +17,7 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 - `/publishers` — စာအုပ်တိုက်အားလုံး (စာမျက်နှာလိုက်) ကြည့်ရန် — တိုက်နှိပ်လျှင် ထိုတိုက်၏ စာအုပ်များ ပြသည်
 - အခြား message မှန်သမျှ — စာအုပ်/စာရေးသူ ရှာဖွေမှု (တစ်မျက်နှာလျှင် ၁၀ အုပ်၊ `နောက်မျက်နှာ ➡️` ဖြင့် ဆက်ကြည့်နိုင်၊ နာမည်နှိပ်လျှင် ကာဗာပုံ + အသေးစိတ် ပြသည်)
 - Sheet ထဲတွင် စာလုံးပေါင်းကွဲနေသော စာအုပ်တိုက်အမည်များကို တစ်ခုတည်းအဖြစ် ပေါင်းပြသည် (ဥပမာ `ဆုပြည့်စုံထွန်း` → `ဆုပြည့်စုံထွန်းစာပေ`)
-- စာအုပ်ကဒ် caption တွင် အညွှန်းကို မပြဘဲ အချက်အလက်များသာ ပြသည်။ အညွှန်းရှိသော စာအုပ်တိုင်းတွင် `📖 အညွှန်းဖတ်ရန်` ခလုတ်ပါပြီး နှိပ်မှသာ အညွှန်း (အပြည့်အစုံ) ကို သီးခြား message ဖြင့် ပြသည် (Group တွင် ၅ မိနစ်အကြာ auto-delete)။
+- စာအုပ်ကဒ် caption တွင် အညွှန်းကို မပြဘဲ အချက်အလက်များသာ ပြသည်။ အညွှန်းရှိသော စာအုပ်တိုင်းတွင် `📖 အညွှန်းဖတ်ရန်` ခလုတ်ပါပြီး နှိပ်လျှင် bot ၏ **DM** သို့ ရောက်သွားပြီး အညွှန်း (အပြည့်အစုံ) ကို DM တွင် ဖတ်နိုင်သည် (Group ထဲတွင် စာအရှည်ကြီး မပြပါ)။
 - စာအုပ်ကဒ်ပေါ်က `🛒 စာအုပ်မှာရန်` ခလုတ်ကို နှိပ်လျှင် စာအုပ်တိုက်၏ မှာယူရန် link (Telegram Channel / Facebook Page စသည်) ကို တိုက်ရိုက်ဖွင့်ပေးပြီး ဝယ်သူက သူ့ဘာသာ မှာယူနိုင်သည်။
 
 ## Publisher channels (စာအုပ်မှာရန်)
@@ -54,6 +54,7 @@ Data source: [Google Sheets (Form responses)](https://docs.google.com/spreadshee
 | `STATE_DIR` | ❌ | `/tmp` | Durable state folder (Railway volume `/data`) — known books, subscribers, groups, publisher links, cover cache |
 | `NOTIFY_GROUP_ID` | ❌ | — | ရှိပြီးသား group တစ်ခုအား အမြဲအသိပေးရန် ထည့်နိုင်သည် |
 | `SHEET_CSV_URL` | ❌ | Google Sheets export URL | စာအုပ်စာရင်း CSV URL |
+| `BOT_USERNAME` | ❌ | `saroatsarpay_bot` | Group မှ `📖 အညွှန်းဖတ်ရန်` deep link အတွက် (startup တွင် `get_me()` မှ အလိုအလျောက် ယူသည်) |
 
 ## Durable state (Railway volume)
 - Railway ပေါ်တွင် volume `book-search-bot-volume` ကို `/data` တွင် mount ထားပြီး `STATE_DIR=/data`၊ `IMAGE_CACHE_DIR=/data/covers` ဟု သတ်မှတ်ထားသည်။

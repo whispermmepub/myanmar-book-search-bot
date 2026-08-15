@@ -43,6 +43,9 @@ log = logging.getLogger("bot")
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OWNER_ID = os.environ.get("TELEGRAM_OWNER_ID", "")
+# Bot username used to build deep links ("…?start=summary_<id>") that take
+# group taps to the bot DM. Refreshed from get_me() at startup.
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "saroatsarpay_bot")
 REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
 
 store = BookStore()
@@ -396,11 +399,24 @@ def has_description(book: dict) -> bool:
     return bool((book.get("description") or "").strip())
 
 
-def _card_keyboard(book: dict, back: bool = False) -> InlineKeyboardMarkup | None:
-    """Buttons on a book card: full description (when available), order, back."""
+def summary_deep_link(book_id: int) -> str:
+    """Deep link that opens the bot DM and asks for the book index."""
+    return f"https://t.me/{BOT_USERNAME}?start=summary_{book_id}"
+
+
+def _card_keyboard(book: dict, back: bool = False, chat_type: str | None = None) -> InlineKeyboardMarkup | None:
+    """Buttons on a book card: full description (when available), order, back.
+
+    In groups the index button is a deep link so tapping it opens the bot DM
+    instead of dumping the long index into the group chat; in DM it stays a
+    callback so the index appears instantly in place.
+    """
     rows = []
     if has_description(book):
-        rows.append([InlineKeyboardButton("📖 အညွှန်းဖတ်ရန်", callback_data=f"summary:{book['id']}")])
+        if chat_type in ("group", "supergroup"):
+            rows.append([InlineKeyboardButton("📖 အညွှန်းဖတ်ရန်", url=summary_deep_link(book["id"]))])
+        else:
+            rows.append([InlineKeyboardButton("📖 အညွှန်းဖတ်ရန်", callback_data=f"summary:{book['id']}")])
     channel = publisher_channel(book)
     if channel:
         rows.append([InlineKeyboardButton("🛒 စာအုပ်မှာရန်", url=channel)])
@@ -420,10 +436,11 @@ async def send_card_to_chat(
     caption: str | None = None,
     reply_markup=None,
     context: ContextTypes.DEFAULT_TYPE | None = None,
+    chat_type: str | None = None,
 ):
     """Send a book card (photo + details) to an arbitrary chat id."""
     caption = caption or build_caption(book)
-    markup = reply_markup if reply_markup is not None else _card_keyboard(book)
+    markup = reply_markup if reply_markup is not None else _card_keyboard(book, chat_type=chat_type)
     image_id = book["image_id"]
     saved_file_id = file_ids.get(image_id)
     if saved_file_id:
@@ -450,14 +467,14 @@ async def announce_new_books(context: ContextTypes.DEFAULT_TYPE, books: list[dic
         targets = []
         for gid in bot_groups:
             try:
-                sent = await send_card_to_chat(context.bot, gid, book, caption=caption)
+                sent = await send_card_to_chat(context.bot, gid, book, caption=caption, chat_type="group")
                 schedule_auto_delete(context, sent.chat.id, sent.chat.type, sent.message_id)
                 targets.append(f"group:{gid}")
             except Exception as exc:  # noqa: BLE001
                 log.warning("Group announce to %s failed for %s: %s", gid, book["title"], exc)
         for uid in list(subscribers):
             try:
-                await send_card_to_chat(context.bot, uid, book, caption=caption)
+                await send_card_to_chat(context.bot, uid, book, caption=caption, chat_type="private")
                 targets.append(str(uid))
             except Exception as exc:  # noqa: BLE001
                 log.warning("DM announce to %s failed for %s: %s", uid, book["title"], exc)
@@ -492,6 +509,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat and update.effective_chat.type == "private":
         add_subscriber(update.effective_chat.id)
         record_start(update.effective_chat.id)
+    # Deep link from the "အညွှန်းဖတ်ရန်" button (https://t.me/<bot>?start=summary_<id>):
+    # show the book index here in the DM instead of inside the group.
+    payload = ""
+    text = (update.effective_message.text or "").strip()
+    if " " in text:
+        payload = text.split(maxsplit=1)[1].strip()
+    if payload.startswith("summary_"):
+        if update.effective_chat and update.effective_chat.type != "private":
+            await update.effective_message.reply_text(
+                "📖 အညွှန်းကို bot ရဲ့ DM မှာ ဖတ်နိုင်ပါတယ် — ခလုတ်ကို နှိပ်လိုက်ရင် အလိုအလျောက် ရောက်သွားပါမယ်။"
+            )
+            return
+        try:
+            book_id = int(payload.split("_", 1)[1])
+        except ValueError:
+            book_id = None
+        book = store.by_id(book_id) if book_id is not None else None
+        if not book:
+            await update.effective_message.reply_text("😕 ဒီစာအုပ် အချက်အလက် မရှိတော့ပါ။ ထပ်ရှာကြည့်ပါ။")
+            return
+        desc = (book.get("description") or "").strip()
+        if not desc:
+            await update.effective_message.reply_text("📖 ဒီစာအုပ်မှာ အညွှန်း မရှိပါ။")
+            return
+        await update.effective_message.reply_text(
+            f"📖 စာအုပ်အမည်: {book['title']}\n"
+            f"✍️ စာရေးသူ: {book['author']}\n\n"
+            f"📝 အညွှန်း (အပြည့်အစုံ):\n\n{desc}"
+        )
+        return
     bot = context.bot.username
     await update.effective_message.reply_text(
         "👋 မင်္ဂလာပါ!\n\n"
@@ -692,7 +739,7 @@ def schedule_auto_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, chat_
 async def send_book_card(target, book: dict, context: ContextTypes.DEFAULT_TYPE | None = None, include_back: bool = False):
     LAST_VIEWED[target.chat.id] = book["id"]
     caption = build_caption(book)
-    markup = _card_keyboard(book, back=include_back)
+    markup = _card_keyboard(book, back=include_back, chat_type=target.chat.type)
     image_id = book["image_id"]
     saved_file_id = file_ids.get(image_id)
     if saved_file_id:
@@ -1146,12 +1193,12 @@ async def demo_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     done = []
     for gid in bot_groups:
         try:
-            sent = await send_card_to_chat(context.bot, gid, book, caption=caption)
+            sent = await send_card_to_chat(context.bot, gid, book, caption=caption, chat_type="group")
             schedule_auto_delete(context, sent.chat.id, sent.chat.type, sent.message_id)
             done.append(f"group:{gid}")
         except Exception as exc:  # noqa: BLE001
             log.warning("Demo group send to %s failed: %s", gid, exc)
-    sent = await send_card_to_chat(context.bot, update.effective_chat.id, book, caption=caption)
+    sent = await send_card_to_chat(context.bot, update.effective_chat.id, book, caption=caption, chat_type="private")
     done.append("DM")
     reply = await update.effective_message.reply_text(
         f"✅ Demo ပို့ပြီးပါပြီ → {', '.join(done)}\n"
@@ -1161,7 +1208,9 @@ async def demo_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def post_init(application: Application) -> None:
+    global BOT_USERNAME
     me = await application.bot.get_me()
+    BOT_USERNAME = me.username or BOT_USERNAME
     log.info("Bot started: @%s (%s)", me.username, me.first_name)
     load_persisted_state()
     load_file_ids()
