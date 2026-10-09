@@ -8,11 +8,10 @@
   "d1_databases": [{
     "binding": "DB",
     "database_name": "book-search",
-    "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+    "database_id": "7f48e3bc-ac9b-43d3-8dab-a768b147bdfc",
     "migrations_dir": "migrations"
   }],
-  // Create this bucket, or remove r2_buckets to use Telegram file_id caching only.
-  "r2_buckets": [{ "binding": "COVERS", "bucket_name": "book-search-covers" }],
+  // R2 is optional; Telegram file_id caching keeps cover delivery working without it.
   "triggers": { "crons": ["* * * * *"] },
   "vars": {
     "BOT_USERNAME": "saroatsarpay_bot",
