@@ -1,6 +1,6 @@
 import { allBooks, byId, canonicalPublisher, normalize, publisherList, search } from './catalog';
 import { autoSubscribe, lease, loadState, markActive, meta, release, rememberGroup, saveState, scheduleDelete, subscribe } from './db';
-import { enqueueDemo, migrateGroup } from './maintenance';
+import { drainNotifications, enqueueDemo, migrateGroup, refreshCatalog } from './maintenance';
 import { buildCaption, cardKeyboard, channelLink, Telegram, TelegramError } from './telegram';
 import { clip, id, isGroup, now, setting, type Book, type Callback, type Chat, type Env, type ListState, type Markup, type Message, type Update } from './types';
 
@@ -132,9 +132,17 @@ async function handleMessage(env: Env, message: Message, updateId: number): Prom
     }
     case 'usage': await telegram.text(message.chat, await usageText(env)); break;
     case 'refresh': {
-      const sent = await telegram.text(message.chat, 'စာအုပ်စာရင်း ပြန်ဆွဲရန် စာရင်းသွင်းပြီးပါပြီ။ နောက် cron tick (တစ်မိနစ်ခန့်) မှာ ဆောင်ရွက်ပါမယ်။');
-      await env.DB.prepare('INSERT OR IGNORE INTO refresh_requests(chat_id,message_id,chat_type,created_at) VALUES(?,?,?,?)')
-        .bind(id(message.chat.id), sent.message_id, message.chat.type, now()).run(); break;
+      const sent = await telegram.text(message.chat, '🔄 စာအုပ်စာရင်း ပြန်ဆွဲနေပါတယ်…');
+      try {
+        const result = await refreshCatalog(env);
+        await drainNotifications(env);
+        await telegram.edit(message.chat, sent.message_id,
+          `✅ ပြီးပါပြီ — စာအုပ် ${result.count} ခု ရှိပါတယ်။\nအသစ် ${result.newCount} အုပ် — group/DM အသိပေးရန် queue ထဲ ထည့်ထားပါပြီ။`);
+      } catch {
+        await telegram.edit(message.chat, sent.message_id,
+          '❌ စာအုပ်စာရင်း ပြန်ဆွဲမှု မအောင်မြင်ပါ။ ယခင် data ကို ဆက်သုံးထားပါတယ်။ /refresh ဖြင့် ထပ်စမ်းပါ။');
+      }
+      break;
     }
     case 'get': if (cmd.args) await doSearch(env, message, cmd.args); else await telegram.text(message.chat, 'ဥပမာ: /get မြစ်ရိုင်း (သို့) /get တင်မောင်မြင့်'); break;
     case 'addpublisher': await addPublisher(env, message, cmd.args); break;
