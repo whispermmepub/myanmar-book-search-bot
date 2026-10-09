@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "myanmar-book-search-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-27",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "book-search",
+    "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+    "migrations_dir": "migrations"
+  }],
+  // Create this bucket, or remove r2_buckets to use Telegram file_id caching only.
+  "r2_buckets": [{ "binding": "COVERS", "bucket_name": "book-search-covers" }],
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "BOT_USERNAME": "saroatsarpay_bot",
+    "REFRESH_HOURS": "6",
+    "NOTIFY_MAX_PER_REFRESH": "25",
+    "NOTIFICATION_BATCH": "3",
+    "DELETE_BATCH": "5",
+    "INBOX_BATCH": "2",
+    "AUTO_DELETE_SECONDS": "300",
+    "STATE_TTL_HOURS": "168",
+    "WARM_COVERS_PER_TICK": "1"
+  }
+}
