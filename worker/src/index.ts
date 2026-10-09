@@ -63,6 +63,24 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === 'GET' && url.pathname === '/health') return Response.json({ ok: true, service: 'myanmar-book-search-worker' });
+    if (request.method === 'POST' && url.pathname === '/setup-webhook') {
+      if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) return new Response('Secrets not configured', { status: 503 });
+      const supplied = request.headers.get('X-Setup-Secret') ?? '';
+      if (!await equalSecret(supplied, env.TELEGRAM_WEBHOOK_SECRET)) return new Response('Unauthorized', { status: 401 });
+      const telegram = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`;
+      const response = await fetch(telegram, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          url: `${url.origin}/webhook`,
+          secret_token: env.TELEGRAM_WEBHOOK_SECRET,
+          allowed_updates: ['message', 'callback_query', 'inline_query', 'my_chat_member'],
+          max_connections: 1,
+          drop_pending_updates: false,
+        }),
+      });
+      return new Response(await response.text(), { status: response.status, headers: { 'content-type': 'application/json' } });
+    }
     if (request.method === 'GET' && /^\/covers\/[\w-]{1,200}$/.test(url.pathname)) {
       return coverResponse(env, url.pathname.slice(8));
     }
